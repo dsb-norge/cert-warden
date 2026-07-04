@@ -175,3 +175,29 @@ AZSTUB
   run jq -e '.secrets | length == 2' <(grep '^candidates-json=' "${GITHUB_OUTPUT}" | cut -d= -f2-)
   assert_success
 }
+
+@test "garbage (non-JSON) certificate listing aborts instead of green no-op" {
+  cat >"${BATS_TEST_TMPDIR}/bin/az" <<'AZSTUB'
+#!/usr/bin/env bash
+echo "az $*" >>"${AZ_STUB_CALLS}"
+case "$1 $2 $3" in
+  "keyvault certificate list") echo "ERROR: something not json" ;;
+  *) exit 0 ;;
+esac
+AZSTUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export LOG_ONLY="false"
+  run bash "${SWEEPER_SH}"
+  assert_failure
+  assert_output --partial "not a JSON array"
+  run grep -c "delete" "${AZ_STUB_CALLS}"
+  assert_output "0"
+}
+
+@test "step summary stays clean markdown (no log prefixes)" {
+  seed_typical_vault
+  run bash "${SWEEPER_SH}"
+  assert_success
+  run grep -c "sweeper: " "${GITHUB_STEP_SUMMARY}"
+  assert_output "0"
+}

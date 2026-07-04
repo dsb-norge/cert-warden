@@ -1,0 +1,9 @@
+# Chaos overlay for the e2e suite: re-enables Pebble's hostile nonce rejection (default 5%,
+# raised to lego's own e2e value of 20%) to prove the retry path end-to-end. Applied by the
+# final scenario only:  docker compose -f docker-compose.pebble.yml -f <this> up -d pebble
+services:
+  pebble:
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "20"
+      PEBBLE_AUTHZREUSE: "0"

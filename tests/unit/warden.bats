@@ -170,3 +170,72 @@ setup() {
   dns_zone_is_publicly_delegated "f6.example.test" '["ns1.f6.example.test."]' || rc=$?
   [ "${rc}" -eq 2 ]
 }
+
+@test "delegation semantics: configured NS must be a subset of public NS" {
+  source "${WARDEN_SH}"
+  loadConfig
+  # dig PATH-stub controlled per-case via DIG_STUB_NS (newline-separated answer).
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  # shellcheck disable=SC2016 # expansion deliberately deferred to the stub at run time
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "${DIG_STUB_NS}"\n' >"${BATS_TEST_TMPDIR}/bin/dig"
+  chmod +x "${BATS_TEST_TMPDIR}/bin/dig"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+
+  # exact match -> delegated
+  export DIG_STUB_NS=$'ns1.x.test.\nns2.x.test.'
+  run dns_zone_is_publicly_delegated "x.test" '["ns1.x.test.","ns2.x.test."]'
+  assert_success
+  # configured subset of public (extra public NS) -> delegated
+  export DIG_STUB_NS=$'ns1.x.test.\nns2.x.test.\nns3.other.test.'
+  run dns_zone_is_publicly_delegated "x.test" '["ns1.x.test."]'
+  assert_success
+  # configured NS missing from public answer -> NOT delegated
+  export DIG_STUB_NS=$'ns1.x.test.'
+  run dns_zone_is_publicly_delegated "x.test" '["ns1.x.test.","ns2.x.test."]'
+  assert_failure 1
+  # empty public answer (SERVFAIL-shaped) -> NOT delegated
+  export DIG_STUB_NS=''
+  run dns_zone_is_publicly_delegated "x.test" '["ns1.x.test."]'
+  assert_failure 1
+}
+
+@test "garbage PFX from the vault fails installZoneCertFromKeyVault cleanly" {
+  source "${WARDEN_SH}"
+  loadConfig
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  # az returns base64 of garbage bytes for the cert-backing secret.
+  cat >"${BATS_TEST_TMPDIR}/bin/az" <<'AZSTUB'
+#!/usr/bin/env bash
+printf 'bm90LWEtcGZ4LWF0LWFsbA==' # "not-a-pfx-at-all"
+AZSTUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+  run installZoneCertFromKeyVault "kv" "le-cert-staging-x-pfx" \
+    "${BATS_TEST_TMPDIR}/c.crt" "${BATS_TEST_TMPDIR}/c.key" "${BATS_TEST_TMPDIR}/c.issuer" "pw"
+  assert_failure
+}
+
+@test "recordCertMetric survives a certificate without SANs (P-12 guard)" {
+  source "${WARDEN_SH}"
+  loadConfig
+  # Real self-signed cert with NO subjectAltName: the SAN/keytype greps find nothing and,
+  # unguarded, would abort the run under pipefail before metrics were written.
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -keyout "${BATS_TEST_TMPDIR}/k.pem" -out "${BATS_TEST_TMPDIR}/nosan.pem" \
+    -days 2 -subj "/CN=nosan.example.test" >/dev/null 2>&1
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="nosan.example.test"
+  certKvPfxSecretName="le-cert-staging-nosan-pfx"
+  run bash -c "
+    set -euo pipefail
+    source '${WARDEN_SH}'; loadConfig
+    metricsFile='${metricsFile}'; zoneName='nosan.example.test'; certKvPfxSecretName='x-pfx'
+    recordCertMetric 'issued' '${BATS_TEST_TMPDIR}/nosan.pem' ''
+    echo SURVIVED
+  "
+  assert_success
+  assert_output --partial "SURVIVED"
+  run jq -s -e '.[0].san == [] and .[0].days_to_expiry != null' "${metricsFile}"
+  assert_success
+}

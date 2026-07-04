@@ -213,3 +213,30 @@ AdaptiveCard"
   [ ! -f "${CW_STATE}/secrets/le-cert-staging-cw-test-internal-pfx-meta" ]
   [ ! -f "${CW_STATE}/secrets/letsencrypt-staging-account-key" ]
 }
+
+@test "e2e-7 chaos: issuance succeeds under 20% nonce rejection (retry path, fresh CA)" {
+  # Restart Pebble with hostile nonces (fresh CA root + empty account state), single zone to
+  # keep the runtime bounded, wiped vault so registration + issuance both run under chaos.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[ {"name": "cw-test.internal", "nameServers": ["ns1.cw-test.internal."]} ]
+JSON
+  rm -f "${CW_STATE}"/secrets/* "${CW_STATE}"/certs/* 2>/dev/null || true
+
+  docker compose -f "${HARNESS}/docker-compose.pebble.yml" \
+    -f "${HARNESS}/docker-compose.chaos.override.yml" up -d --wait pebble
+  local tries=0
+  until curl -fsS --cacert "${HARNESS}/pebble.minica.pem" https://localhost:14000/dir >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    ((tries > 30)) && skip "pebble did not come back under chaos config"
+    sleep 1
+  done
+  # New boot => new issuance root; the az shim verifies chains against this file.
+  curl -fsSk https://localhost:15000/roots/0 -o "${BATS_FILE_TMPDIR}/pebble-root.pem"
+
+  run_warden
+  assert_success
+  run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
+  assert_output "issued"
+  run grep -c "chain VERIFIED against test root" <(tail -5 "${CW_STATE}/calls.log")
+  assert_output "1"
+}

@@ -79,7 +79,7 @@ jobs:
 
       - name: Sweep
         id: sweep
-        uses: dsb-norge/cert-warden/actions/sweeper@v0.0.0 # x-release-please-version
+        uses: dsb-norge/cert-warden/actions/sweeper@v1.0.0 # x-release-please-version
         with:
           key-vault-name: ${{ inputs.key-vault-name }}
           log-only: ${{ inputs.log-only }}

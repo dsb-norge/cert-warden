@@ -35,8 +35,16 @@ set -o pipefail
 # Command substitution inherits errexit (bash >= 4.4) — see docs/testing.md (pitfalls P-2).
 shopt -s inherit_errexit
 
+# Self-sufficient helpers load (log-info / start-group / ...): the composite action shim
+# sources lib/helpers.bash (allexport) before running this script; standalone runs (tests,
+# scripts/run-local.sh) load it here. helpers derives the log prefix ("monitor") from this
+# script's directory.
+if ! declare -F log-info >/dev/null 2>&1; then
+  # shellcheck source=../../lib/helpers.bash
+  source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/../../lib/helpers.bash"
+fi
+
 # region: setup ---------------------------------------------------------------------------------
-_action_name="monitor"
 
 WARN_THRESHOLD="${WARN_THRESHOLD:-0.40}"
 PAGE_THRESHOLD="${PAGE_THRESHOLD:-0.15}"
@@ -69,7 +77,7 @@ failedZones=""
 # jq empty: a truncated/corrupt artifact (e.g. the warden died mid-write) must degrade to the
 # absent-metrics path — the monitor NEVER fails the workflow (its core contract).
 if [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]] && jq empty "${METRICS_FILE}" 2>/dev/null; then
-  echo "::group::${_action_name}: metrics evaluation"
+  start-group "metrics evaluation"
 
   managedCount=$(jq '[.[] | select((.kv_cert_name // "") != "" and .action != "not_delegated")] | length' "${METRICS_FILE}")
   # failed zones deliberately do NOT require a kv_cert_name: early failures (e.g. SAN
@@ -87,7 +95,7 @@ if [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]] && jq empty "${METRICS_F
   fi
 
   echo "${_action_name}: managed=${managedCount} failed=${failedCount} min_lifetime_fraction=${minLifetimeFraction} worst_zone=${worstZone} worst_days=${worstDays}"
-  echo "::endgroup::"
+  end-group
 else
   echo "${_action_name}: metrics file '${METRICS_FILE:-<unset>}' missing, empty or unparsable."
 fi
@@ -163,14 +171,14 @@ notifyHttpStatus=""
 emitOutputs() {
   [[ -n "${GITHUB_OUTPUT:-}" ]] || return 0
   {
-    echo "severity=${severity}"
-    echo "min-lifetime-fraction=${minLifetimeFraction}"
-    echo "managed-count=${managedCount}"
-    echo "failed-count=${failedCount}"
-    echo "worst-zone=${worstZone}"
-    echo "reasons-json=$(printf '%s\n' "${reasons[@]:-}" | jq -R . | jq -sc 'map(select(. != ""))')"
-    echo "notified=${notified}"
-    echo "notify-http-status=${notifyHttpStatus}"
+    log-info "severity=${severity}"
+    log-info "min-lifetime-fraction=${minLifetimeFraction}"
+    log-info "managed-count=${managedCount}"
+    log-info "failed-count=${failedCount}"
+    log-info "worst-zone=${worstZone}"
+    log-info "reasons-json=$(printf '%s\n' "${reasons[@]:-}" | jq -R . | jq -sc 'map(select(. != ""))')"
+    log-info "notified=${notified}"
+    log-info "notify-http-status=${notifyHttpStatus}"
   } >>"${GITHUB_OUTPUT}"
 }
 # endregion -------------------------------------------------------------------------------------
@@ -254,7 +262,7 @@ elif [[ -z "${BOT_API_BASE}" || -z "${BOT_API_AUDIENCE}" || -z "${BOT_ALIAS}" ]]
   exit 0
 fi
 
-echo "::group::${_action_name}: notify bot"
+start-group "notify bot"
 if ! token=$(az account get-access-token --resource "${BOT_API_AUDIENCE}" --query accessToken -o tsv); then
   echo "::warning::${_action_name}: could not acquire a token for ${BOT_API_AUDIENCE} — notification not delivered (evaluation stands)."
   echo "::endgroup::"
@@ -270,7 +278,7 @@ httpStatus=$(curl -sS --max-time 30 -o /tmp/notify-resp.json -w '%{http_code}' \
   -d "${payload}" || true)
 echo "${_action_name}: bot responded HTTP ${httpStatus}"
 cat /tmp/notify-resp.json 2>/dev/null || true
-echo "::endgroup::"
+end-group
 
 notifyHttpStatus="${httpStatus}"
 if [[ "${httpStatus}" != "202" && "${httpStatus}" != "200" ]]; then

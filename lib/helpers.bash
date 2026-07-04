@@ -37,10 +37,4 @@ function set-multiline-output {
     echo "${delimiter}"
   } >>"${GITHUB_OUTPUT:?set-multiline-output requires GITHUB_OUTPUT}"
 }
-function ws-path {
-  local inPath
-  inPath="${1}"
-  realpath --relative-to="${GITHUB_WORKSPACE}" "${inPath}"
-}
-
 log-info "'$(basename "${BASH_SOURCE[0]}")' loaded."

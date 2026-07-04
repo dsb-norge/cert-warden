@@ -175,12 +175,12 @@ log-info "Candidates: ${#del_certs[@]} certificate(s) + ${#del_secrets[@]} secre
 # deleted-count is re-emitted after a destructive pass (last occurrence wins).
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   {
-    echo "candidates-count=${total}"
+    log-info "candidates-count=${total}"
     echo "candidates-json=$(jq -nc \
       --argjson certs "$(printf '%s\n' "${del_certs[@]+"${del_certs[@]}"}" | jq -R . | jq -sc 'map(select(. != ""))')" \
       --argjson secrets "$(printf '%s\n' "${del_secrets[@]+"${del_secrets[@]}"}" | jq -R . | jq -sc 'map(select(. != ""))')" \
       '{certificates: $certs, secrets: $secrets}')"
-    echo "deleted-count=0"
+    log-info "deleted-count=0"
   } >>"${GITHUB_OUTPUT}"
 fi
 

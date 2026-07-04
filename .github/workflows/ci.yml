@@ -294,7 +294,9 @@ jobs:
     # Advisory per docs/testing.md: kcov's bash parser has known blind spots (heredocs) and a
     # reported bats-in-CI nondeterminism — the number is a trend signal; the job never fails
     # the build. Promote to a hard gate once observed stable.
-    runs-on: ubuntu-latest
+    # ubuntu-22.04: kcov is packaged in jammy but was dropped from 24.04 (noble); move back to
+    # -latest if/when kcov returns or we switch to building it from source.
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
     steps:

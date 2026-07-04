@@ -1,0 +1,46 @@
+name: "setup-go-tool"
+description: >-
+  CI-internal: install a Go-based tool with `go install`, cached by module+version+os+arch so
+  repeat runs skip the download/compile. Not part of the public action surface (lives under
+  .github/actions/, referenced only as `uses: ./.github/actions/setup-go-tool`).
+
+inputs:
+  module:
+    description: "Go module path of the tool's main package (e.g. mvdan.cc/sh/v3/cmd/shfmt)."
+    required: true
+  version:
+    description: "Module version tag (e.g. v3.9.0)."
+    required: true
+  binary:
+    description: "Installed binary name."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Cache tool
+      id: cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/go-tools/${{ inputs.binary }}
+        key: "go-tool-${{ inputs.binary }}-${{ inputs.version }}-${{ runner.os }}-${{ runner.arch }}"
+
+    - name: Install
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        MODULE: ${{ inputs.module }}
+        VERSION: ${{ inputs.version }}
+        GOBIN: ${{ runner.temp }}/go-tools/${{ inputs.binary }}
+      run: |
+        mkdir -p "${GOBIN}"
+        go install "${MODULE}@${VERSION}"
+
+    - name: Add to PATH
+      shell: bash
+      env:
+        TOOL_DIR: ${{ runner.temp }}/go-tools/${{ inputs.binary }}
+        BINARY: ${{ inputs.binary }}
+      run: |
+        echo "${TOOL_DIR}" >>"${GITHUB_PATH}" # zizmor: ignore[github-env] runner-temp path, not attacker-influenced
+        "${TOOL_DIR}/${BINARY}" --version 2>/dev/null || "${TOOL_DIR}/${BINARY}" version || true

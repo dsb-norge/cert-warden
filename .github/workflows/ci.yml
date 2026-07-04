@@ -53,8 +53,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install shfmt
-        run: go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}"
+      - name: Install shfmt (cached)
+        uses: ./.github/actions/setup-go-tool
+        with:
+          module: mvdan.cc/sh/v3/cmd/shfmt
+          version: ${{ env.SHFMT_VERSION }}
+          binary: shfmt
 
       - name: shellcheck
         run: |
@@ -71,7 +75,7 @@ jobs:
       - name: shfmt (diff mode)
         run: |
           # shfmt reads .editorconfig natively; -d exits non-zero when formatting differs.
-          "$(go env GOPATH)/bin/shfmt" -d .
+          shfmt -d .
 
   lint-workflows:
     name: "actionlint"
@@ -83,13 +87,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install and run actionlint
-        run: |
-          # actionlint validates expressions, action inputs, local reusable-workflow targets,
-          # and runs shellcheck over inline `run:` blocks (shellcheck is preinstalled on
-          # ubuntu-latest).
-          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
-          "$(go env GOPATH)/bin/actionlint" -color
+      - name: Install actionlint (cached)
+        uses: ./.github/actions/setup-go-tool
+        with:
+          module: github.com/rhysd/actionlint/cmd/actionlint
+          version: ${{ env.ACTIONLINT_VERSION }}
+          binary: actionlint
+
+      - name: Run actionlint
+        # Validates expressions, action inputs, local reusable-workflow targets, and runs
+        # shellcheck over inline `run:` blocks (shellcheck is preinstalled on ubuntu-latest).
+        run: actionlint -color
 
   lint-yaml:
     name: "yamllint"
@@ -147,14 +155,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install and run pinact
+      - name: Install pinact (cached)
+        uses: ./.github/actions/setup-go-tool
+        with:
+          module: github.com/suzuki-shunsuke/pinact/v4/cmd/pinact
+          version: ${{ env.PINACT_VERSION }}
+          binary: pinact
+
+      - name: Run pinact
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          # Verifies every `uses:` in workflows AND composite action.yml files is pinned to a
-          # full-length SHA with a version comment. --check: report, don't rewrite.
-          go install "github.com/suzuki-shunsuke/pinact/v4/cmd/pinact@${PINACT_VERSION}"
-          "$(go env GOPATH)/bin/pinact" run --check
+        # Verifies every `uses:` in workflows AND composite action.yml files is pinned to a
+        # full-length SHA with a version comment. --check: report, don't rewrite.
+        run: pinact run --check
 
   commitlint:
     name: "commitlint"

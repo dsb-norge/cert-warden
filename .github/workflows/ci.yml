@@ -28,6 +28,8 @@ env:
   ZIZMOR_VERSION: "1.26.1"
   # renovate: datasource=go depName=github.com/suzuki-shunsuke/pinact/v4
   PINACT_VERSION: "v4.1.0"
+  # renovate: datasource=github-releases depName=bats-core/bats-core
+  BATS_VERSION: "1.13.0"
 
 # Default-deny; each job grants only what it needs.
 permissions: {}
@@ -266,6 +268,86 @@ jobs:
           REPO: ${{ github.repository }}
         run: bash scripts/ci/check-private-references.sh
 
+  unit-tests:
+    name: "unit tests (bats)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install bats + libraries
+        uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
+        with:
+          bats-version: ${{ env.BATS_VERSION }}
+          detik-install: false # kubernetes-oriented; not used here
+
+      - name: Run unit tests
+        env:
+          BATS_LIB_PATH: /usr/lib # bats-action installs libs to /usr/lib/bats-*
+        run: bats --print-output-on-failure tests/unit
+
+  coverage:
+    name: "coverage (kcov, advisory)"
+    # Advisory per docs/testing.md: kcov's bash parser has known blind spots (heredocs) and a
+    # reported bats-in-CI nondeterminism — the number is a trend signal; the job never fails
+    # the build. Promote to a hard gate once observed stable.
+    # ubuntu-22.04: kcov is packaged in jammy but was dropped from 24.04 (noble); move back to
+    # -latest if/when kcov returns or we switch to building it from source.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install bats + libraries
+        uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
+        with:
+          bats-version: ${{ env.BATS_VERSION }}
+          detik-install: false
+
+      - name: Install kcov
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq kcov
+
+      - name: Run unit suite under kcov (never fails — advisory)
+        env:
+          BATS_LIB_PATH: /usr/lib
+        run: |
+          # kcov's default bash instrumentation (PS4/xtrace) can leak trace output into what
+          # bats' `run` captures, failing assertions that pass un-instrumented — the known
+          # kcov+bats caveat this job's advisory status exists for. Prefer the DEBUG-trap
+          # method; fall back to the default; never fail the job (the un-instrumented
+          # unit-tests job is the correctness gate).
+          set +e
+          kcov --bash-method=DEBUG --include-path="${PWD}/actions,${PWD}/lib" coverage/ bats tests/unit
+          rc=$?
+          if [[ ${rc} -ne 0 && ! -e coverage/kcov-merged/coverage.json ]]; then
+            echo "retrying with kcov's default bash method"
+            kcov --include-path="${PWD}/actions,${PWD}/lib" coverage/ bats tests/unit
+            rc=$?
+          fi
+          if [[ ${rc} -ne 0 ]]; then
+            echo "::warning::bats under kcov exited ${rc} (instrumentation side effects are a known kcov+bats caveat); coverage data below may be partial."
+          fi
+          exit 0
+
+      - name: Report coverage (warn-only threshold)
+        run: |
+          # kcov writes per-binary dirs + a merged report; take the merged percent.
+          threshold=60 # raise as the integration layer lands; target >= 80
+          pct=$(jq -r '.percent_covered' coverage/kcov-merged/coverage.json 2>/dev/null ||
+            find coverage -name coverage.json -exec jq -r '.percent_covered' {} \; | sort -rn | head -1)
+          echo "### Coverage (kcov, advisory)" >>"${GITHUB_STEP_SUMMARY}"
+          echo "bash line coverage: **${pct:-unknown}%** (advisory threshold: ${threshold}%)" >>"${GITHUB_STEP_SUMMARY}"
+          echo "coverage: ${pct:-unknown}% (threshold ${threshold}%, advisory)"
+          if [[ -n "${pct}" ]] && awk "BEGIN { exit !(${pct} < ${threshold}) }"; then
+            echo "::warning::bash coverage ${pct}% is below the advisory threshold of ${threshold}%."
+          fi
+
   ci-conclusion:
     name: "ci-conclusion"
     # The single required status check. Fails if any needed job failed or was cancelled;
@@ -279,6 +361,8 @@ jobs:
       - pin-check
       - commitlint
       - private-ref-guard
+      - unit-tests
+      - coverage
     runs-on: ubuntu-latest
     permissions: {}
     steps:

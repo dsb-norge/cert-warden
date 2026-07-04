@@ -159,3 +159,11 @@ healthy_record() {
   run grep -c '^failed-count=1$' "${GITHUB_OUTPUT}"
   assert_output "1"
 }
+
+@test "step summary stays clean markdown (no log prefixes)" {
+  write_metrics_fixture "${METRICS}" "$(healthy_record)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  run grep -c "monitor: " "${GITHUB_STEP_SUMMARY}"
+  assert_output "0"
+}

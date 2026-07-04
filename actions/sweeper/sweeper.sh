@@ -63,19 +63,18 @@ PROTECTED_PREFIXES="${PROTECTED_PREFIXES:-letsencrypt-production-account- cert-}
 
 # --- helpers --------------------------------------------------------------------------------
 
-# Echo "true" if $1 starts with any of the space-separated prefixes in $2, else "false".
+# Return 0 when $1 starts with any of the space-separated prefixes in $2, else 1.
+# EXIT CODES, deliberately not stdout: string-returning predicates are the fragility class
+# that let a logging refactor silently break this selection logic once (docs/testing.md P-22).
 function matches_any_prefix {
   local name="${1}" prefixes="${2}" p
   for p in ${prefixes}; do
-    if [[ "${name}" == "${p}"* ]]; then
-      echo "true"
-      return
-    fi
+    [[ "${name}" == "${p}"* ]] && return 0
   done
-  echo "false"
+  return 1
 }
 
-# Guard: a protected prefix always wins. Echo "true" if the name must never be deleted.
+# Guard: a protected prefix always wins. Returns 0 when the name must never be deleted.
 function is_protected {
   matches_any_prefix "${1}" "${PROTECTED_PREFIXES}"
 }
@@ -96,6 +95,10 @@ certListJson="$(az keyvault certificate list --vault-name "${KV_NAME}" \
   log-error "Failed to list certificates in '${KV_NAME}' — aborting sweep."
   exit 1
 }
+jq -e 'type == "array"' <<<"${certListJson}" >/dev/null 2>&1 || {
+  log-error "Certificate listing from az is not a JSON array — aborting sweep."
+  exit 1
+}
 mapfile -t cert_rows < <(jq -r '.[] | "\(.name)\t\(.exp // "")"' <<<"${certListJson}")
 
 # Secrets: name only.
@@ -112,13 +115,13 @@ for row in "${cert_rows[@]}"; do
   name="${row%%$'\t'*}"
   exp="${row#*$'\t'}"
 
-  if [[ "$(is_protected "${name}")" == "true" ]]; then
+  if is_protected "${name}"; then
     log-info "  protect : ${name} (protected prefix)"
     continue
   fi
 
   reason=""
-  if [[ "$(matches_any_prefix "${name}" "${TARGET_CERT_PREFIXES}")" == "true" ]]; then
+  if matches_any_prefix "${name}" "${TARGET_CERT_PREFIXES}"; then
     reason="orphan-name"
   elif [[ "${SWEEP_EXPIRED}" == "true" && -n "${exp}" ]]; then
     # az returns ISO-8601; convert to epoch and compare.
@@ -139,11 +142,11 @@ end-group
 
 start-group "Evaluating ${#secret_names[@]} secret(s)"
 for name in "${secret_names[@]}"; do
-  if [[ "$(is_protected "${name}")" == "true" ]]; then
+  if is_protected "${name}"; then
     log-info "  protect : ${name} (protected prefix)"
     continue
   fi
-  if [[ "$(matches_any_prefix "${name}" "${TARGET_SECRET_PREFIXES}")" == "true" ]]; then
+  if matches_any_prefix "${name}" "${TARGET_SECRET_PREFIXES}"; then
     log-info "  DELETE  : ${name} [orphan-name]"
     del_secrets+=("${name}")
   else

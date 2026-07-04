@@ -49,9 +49,10 @@ its *handling* is the generic failed-issuance path, which is covered. Real LE li
 only where real LE is touched: consumer runs and the staging canary.
 
 **Determinism**: `PEBBLE_VA_NOSLEEP=1`, `PEBBLE_WFE_NONCEREJECT=0`, `PEBBLE_AUTHZREUSE=0`
-(authz reuse would let scenarios dodge injected DNS faults). A dedicated chaos scenario with
-nonce rejection enabled is a known gap (tracked; requires a second Pebble instance or a
-restart, since the knob is boot-time).
+(authz reuse would let scenarios dodge injected DNS faults). The final scenario (e2e-7)
+deliberately breaks determinism: it restarts Pebble via the chaos overlay
+(`docker-compose.chaos.override.yml`, 20% nonce rejection — lego's own e2e value) and proves
+a full registration + issuance still succeeds through the retry path against the fresh CA.
 
 ## 3. Writing unit tests (L1)
 
@@ -114,7 +115,8 @@ row AND the test — that's the review bar.
 | P-18 | real KV strips the import password: cert-backing secrets come back as password-less PKCS#12 (and Go's pkcs12 needs `-legacy` under OpenSSL 3) | az shim + e2e-2 |
 | P-19 | Pebble authz reuse (default 50%) lets repeat issuances skip challenges — fault injection silently misses | compose (`PEBBLE_AUTHZREUSE=0`) |
 | P-20 | kcov 38's PS4/xtrace engine leaks trace to stderr: pollutes bats `run` captures AND registers zero source lines (a plausible-looking 0.00%). **Bit this repo** — use bashcov (dedicated `BASH_XTRACEFD`) | coverage via bashcov; advisory threshold |
-| P-21 | hosted-image drift (az/jq/openssl versions); kcov not even packaged in Ubuntu 24.04 | pinned tool versions; bashcov needs only preinstalled Ruby |
+| P-21 | hosted-image drift (az/jq/openssl versions); kcov not even packaged in Ubuntu 24.04 | pinned tool versions; bashcov needs only preinstalled Ruby; weekly scheduled CI run (drift canary) |
+| P-22 | **stdout overload**: in bash, human logs, function return values and machine protocols (GITHUB_OUTPUT, summaries) all share stdout — a logging change can corrupt the other two. **Bit this repo twice in one refactor** (string-returning predicates; output emission) | predicates return EXIT CODES; machine emission only via `set-output`; unit tests assert outputs/summaries are prefix-free |
 
 ## 6. Coverage policy
 

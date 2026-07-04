@@ -14,6 +14,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  schedule:
+    # Weekly drift canary: the moving world (runner images, tool releases, container
+    # registries, external services) breaks things between PRs — surface it on a schedule
+    # instead of on the next unlucky PR. Monday morning, before the work week.
+    - cron: "17 5 * * 1"
 
 # Tool versions, single source of truth for this workflow. Renovate bumps these via the
 # custom regex manager in renovate.json (see the `# renovate:` annotations).
@@ -173,6 +178,7 @@ jobs:
 
   commitlint:
     name: "commitlint"
+    if: github.event_name != 'schedule' # no commit range to lint on the drift canary
     runs-on: ubuntu-latest
     permissions:
       contents: read

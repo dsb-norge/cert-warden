@@ -1,5 +1,7 @@
 # Cert Warden
 
+[![CI](https://github.com/dsb-norge/cert-warden/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dsb-norge/cert-warden/actions/workflows/ci.yml)
+
 Automated Let's Encrypt certificate maintenance for Azure DNS zones and Azure Key Vault,
 delivered as GitHub Actions composite actions and reusable workflows:
 

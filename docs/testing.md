@@ -16,7 +16,7 @@ guarded by a regression test. The guiding rule, in one line:
 | L3 packaging | composite actions via `uses: ./`, asserted outputs | `ci.yml` (`action-smokes`, `integration-tests`) | required |
 | L3b remote-fetch | the suite consumed at a preview tag through GitHub's remote `uses:` path | `preview-consume.yml`, dispatched by `pr-preview.yml` | required |
 | L4 canary | staged consumer rollout via version-bump PRs | consumer repos | consumer-side |
-| coverage | kcov over L1 (advisory — see §6) | `ci.yml` | warn-only |
+| coverage | bashcov over L1+L2 (advisory — see §6) | `ci.yml` (inside `integration-tests`) | warn-only |
 
 What is deliberately NOT tested in CI: real Azure and real Let's Encrypt. That risk is held by
 the consumers' staged rollout (bump PRs merged dev-first) and their monitoring — and optionally
@@ -113,15 +113,24 @@ row AND the test — that's the review bar.
 | P-17 | lego stores accounts under `accounts/<host>[_<port>]` derived from the directory URL — derive paths the same way | e2e-1/e2e-2 |
 | P-18 | real KV strips the import password: cert-backing secrets come back as password-less PKCS#12 (and Go's pkcs12 needs `-legacy` under OpenSSL 3) | az shim + e2e-2 |
 | P-19 | Pebble authz reuse (default 50%) lets repeat issuances skip challenges — fault injection silently misses | compose (`PEBBLE_AUTHZREUSE=0`) |
-| P-20 | kcov's PS4/xtrace instrumentation pollutes bats `run` captures → assertions fail only under coverage | coverage job (advisory by design) |
-| P-21 | hosted-image drift (az/jq/openssl versions) and missing kcov in Ubuntu 24.04 | pinned tool versions; coverage on ubuntu-22.04 |
+| P-20 | kcov 38's PS4/xtrace engine leaks trace to stderr: pollutes bats `run` captures AND registers zero source lines (a plausible-looking 0.00%). **Bit this repo** — use bashcov (dedicated `BASH_XTRACEFD`) | coverage via bashcov; advisory threshold |
+| P-21 | hosted-image drift (az/jq/openssl versions); kcov not even packaged in Ubuntu 24.04 | pinned tool versions; bashcov needs only preinstalled Ruby |
 
 ## 6. Coverage policy
 
-kcov + a local `jq` threshold, **advisory**: kcov's bash parser has heredoc blind spots and
-the P-20 interaction, so the number is a trend signal — the scenario tables above are the
-completeness instrument. The job never fails the build; promote to a hard gate only if it
-proves stable over time.
+**bashcov** (SimpleCov) instruments the combined unit+integration bats run inside the
+`integration-tests` job; `.simplecov` scopes the measurement to `actions/` + `lib/` (product
+code only). The threshold is a warn-only step, **advisory by design**: the number is a trend
+signal — the scenario tables above are the completeness instrument.
+
+Why not kcov: empirically (CI x86_64 and containers alike), kcov 38 — the only packaged
+version — leaks its PS4 xtrace to stderr instead of consuming it, which both pollutes output
+captured by bats' `run` (P-20) and registers **zero** source lines (`covered=0/0`, reported
+as a bogus 0.00%). bashcov traces via a dedicated `BASH_XTRACEFD`, so instrumentation is
+invisible to the tests: the full suite passes identically instrumented and not.
+
+Baseline for the record: the unit layer alone measured **43% of product lines**; the
+integration layer drives the warden's whole main flow on top of that.
 
 ## 7. Running locally
 

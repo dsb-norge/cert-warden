@@ -9,6 +9,12 @@ name: PR preview tag
 #
 # Fork PRs are skipped (the job needs `contents: write`); maintainers can run the rewrite
 # locally for fork contributions.
+#
+# TOKEN: pushing a tag whose tree contains MODIFIED workflow files requires the `workflows`
+# permission — which GITHUB_TOKEN cannot be granted and org policy denies deploy keys for.
+# The push therefore uses the release GitHub App token (same App as release-please). Until
+# the App is configured (RELEASE_APP_ID variable + RELEASE_APP_PRIVATE_KEY secret) the
+# preview is UNAVAILABLE and the sticky comment says so.
 
 on:
   pull_request:
@@ -32,24 +38,36 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
-      contents: write # push the preview tag
+      contents: read
       pull-requests: write # sticky comment
     outputs:
       preview-ref: ${{ steps.preview.outputs.preview-ref }}
       preview-commit: ${{ steps.preview.outputs.preview-commit }}
+      published: ${{ steps.preview.outputs.published }}
     steps:
-      # persist-credentials is deliberately true: this job pushes the preview tag using the
-      # workflow token. zizmor's artipacked audit is suppressed for this workflow in zizmor.yml.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.pull_request.head.sha }}
-          persist-credentials: true
+          persist-credentials: false
+
+      - name: Mint App token (workflows:write — required to push rewritten workflow files)
+        id: app-token
+        if: vars.RELEASE_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
 
       - name: Build preview commit and push tag
         id: preview
+        if: steps.app-token.outcome == 'success'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
         run: |
           previewRef="preview/pr-${PR_NUMBER}"
 
@@ -65,20 +83,33 @@ jobs:
           commit="$(git commit-tree "${tree}" -p "${HEAD_SHA}" \
             -m "preview: ${previewRef} (generated from ${HEAD_SHA}, internal refs rewritten)")"
           git tag -f "${previewRef}" "${commit}"
-          git push --force origin "refs/tags/${previewRef}"
+          git push --force "https://x-access-token:${APP_TOKEN}@github.com/${REPO}.git" \
+            "refs/tags/${previewRef}"
 
           {
             echo "preview-ref=${previewRef}"
             echo "preview-commit=${commit}"
+            echo "published=true"
           } >>"${GITHUB_OUTPUT}"
           echo "Published ${previewRef} -> ${commit} (parent ${HEAD_SHA})"
 
       - name: Compose sticky comment
         env:
+          PUBLISHED: ${{ steps.preview.outputs.published }}
           PREVIEW_REF: ${{ steps.preview.outputs.preview-ref }}
           PREVIEW_COMMIT: ${{ steps.preview.outputs.preview-commit }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          if [[ "${PUBLISHED}" != "true" ]]; then
+            cat >preview-comment.md <<'EOF'
+          ### 🧪 Preview ref: unavailable (bootstrap)
+
+          Publishing a preview tag rewrites workflow files, which requires the release GitHub
+          App (`workflows: write`). Once `RELEASE_APP_ID`/`RELEASE_APP_PRIVATE_KEY` are
+          configured, every PR gets a consumable `preview/pr-<N>` ref here automatically.
+          EOF
+            exit 0
+          fi
           cat >preview-comment.md <<EOF
           ### 🧪 Preview ref for this PR: \`${PREVIEW_REF}\`
 
@@ -110,7 +141,8 @@ jobs:
     needs: publish-preview
     if: >-
       github.event.action != 'closed' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.publish-preview.outputs.published == 'true'
     runs-on: ubuntu-latest
     permissions:
       actions: write # dispatch + watch the consumed run

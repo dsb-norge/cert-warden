@@ -14,11 +14,7 @@ rules:
     ignore:
       - action.yml # zizmor matches by file basename; only setup-lego writes env files today
   artipacked:
-    # These two workflows intentionally keep checkout credentials because they push:
-    #   - pr-preview.yml pushes the preview/pr-<N> tag with the workflow token
-    #   - release-please.yml pushes the floating major tag with the release App token
-    # Neither runs untrusted code: both operate on same-repo refs only (fork PRs are guarded
-    # out), and no build/test step executes within them.
+    # release-please.yml intentionally keeps checkout credentials (the App token) because it
+    # pushes the floating major tag. It runs no untrusted code.
     ignore:
-      - pr-preview.yml
       - release-please.yml

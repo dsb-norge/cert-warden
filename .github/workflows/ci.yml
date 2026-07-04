@@ -393,6 +393,32 @@ jobs:
           echo "CW_AZ_STATE_DIR=${state}" >>"${GITHUB_ENV}"
           echo "${GITHUB_WORKSPACE}/tests/harness/az-shim" >>"${GITHUB_PATH}"
 
+      # The warden action SHIM (env mapping, rc capture, output derivation, shared-lib
+      # sourcing) — exercised without ACME: the only zone is not publicly delegated, so the
+      # run enumerates, evaluates delegation via real dig, records a metric and exits 0.
+      - name: Setup lego (warden's Init verifies the binary)
+        uses: ./actions/setup-lego
+
+      - name: Seed warden fixture (one non-delegated zone)
+        run: |
+          cat >"${CW_AZ_STATE_DIR}/fixtures/zones.json" <<'JSON'
+          [
+            {"name": "definitely-not-delegated.cw-smoke.invalid", "nameServers": ["ns1.nowhere.invalid."]}
+          ]
+          JSON
+
+      - name: Warden action (no-op zone set)
+        id: warden
+        uses: ./actions/warden
+        with:
+          tenant-id: "smoke-tenant"
+          subscription-id: "smoke-sub"
+          dns-rg-name: "smoke-rg"
+          key-vault-name: "smoke-kv"
+          le-account-email: "smoke@example.test"
+          tag-application-name: "l3-smoke"
+          tag-created-by: "https://github.com/dsb-norge/cert-warden"
+
       - name: Monitor action (evaluate-only)
         id: monitor
         uses: ./actions/monitor
@@ -408,6 +434,9 @@ jobs:
 
       - name: Assert outputs
         env:
+          WARDEN_TOTAL: ${{ steps.warden.outputs.zones-total }}
+          WARDEN_MANAGED: ${{ steps.warden.outputs.zones-managed }}
+          WARDEN_METRICS: ${{ steps.warden.outputs.metrics-file }}
           MON_SEVERITY: ${{ steps.monitor.outputs.severity }}
           MON_FAILED: ${{ steps.monitor.outputs.failed-count }}
           MON_NOTIFIED: ${{ steps.monitor.outputs.notified }}
@@ -415,6 +444,11 @@ jobs:
           SWEEP_DELETED: ${{ steps.sweeper.outputs.deleted-count }}
           SWEEP_JSON: ${{ steps.sweeper.outputs.candidates-json }}
         run: |
+          [[ "${WARDEN_TOTAL}" == "1" && "${WARDEN_MANAGED}" == "0" ]] || {
+            echo "::error::warden outputs unexpected: total=${WARDEN_TOTAL} managed=${WARDEN_MANAGED}"
+            exit 1
+          }
+          jq -e '.[0].action == "not_delegated"' "${WARDEN_METRICS}" >/dev/null
           [[ "${MON_SEVERITY}" == "WARNING" && "${MON_FAILED}" == "1" ]] || {
             echo "::error::monitor outputs unexpected: severity=${MON_SEVERITY} failed=${MON_FAILED}"
             exit 1

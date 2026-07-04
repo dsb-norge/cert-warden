@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dsb-norge/cert-warden/contracts/metrics.schema.json",
+  "title": "Cert Warden per-run metrics artifact",
+  "description": "JSON array with one record per DNS zone the warden evaluated. Produced by the warden, consumed by the monitor. Covered by SemVer: additive fields are a minor bump; renames/removals/semantic changes are a major bump.",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["zone", "action", "kv_cert_name", "lifetime_fraction_remaining", "error"],
+    "additionalProperties": true,
+    "properties": {
+      "zone": {
+        "type": "string",
+        "description": "The DNS zone name."
+      },
+      "action": {
+        "type": "string",
+        "enum": ["issued", "renewed", "forced", "skipped", "failed", "none", "not_delegated"],
+        "description": "What happened for the zone this run. not_delegated zones are excluded from the SLO."
+      },
+      "kv_cert_name": {
+        "type": "string",
+        "description": "Key Vault certificate object name (le-cert-<le-env>-<zone-dashed>-pfx); empty for not_delegated."
+      },
+      "lifetime_fraction_remaining": {
+        "type": ["number", "null"],
+        "minimum": 0,
+        "maximum": 1,
+        "description": "Remaining lifetime fraction of the served cert; null when unknown (e.g. failed issuance with no cert). The monitor's SLO input."
+      },
+      "days_to_expiry": {
+        "type": ["number", "null"],
+        "description": "Days until the served cert expires; null when unknown."
+      },
+      "key_type": {
+        "type": ["string", "null"],
+        "description": "Certificate key type (e.g. EC384)."
+      },
+      "error": {
+        "type": "string",
+        "description": "Error message for failed actions; empty otherwise."
+      }
+    }
+  }
+}

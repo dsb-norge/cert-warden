@@ -122,3 +122,23 @@ setup() {
   ' "${metricsFile}"
   assert_success
 }
+
+@test "recordCertMetric output conforms to contracts/metrics.schema.json" {
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="$(mktemp "${BATS_TEST_TMPDIR}/metrics.XXXX")"
+  : >"${metricsFile}"
+  zoneName="schema.example.test"
+  certKvPfxSecretName="le-cert-staging-schema-example-test-pfx"
+  recordCertMetric "failed" "-" "boom"
+
+  # Validate against the shipped schema itself (required fields + the action enum) so the
+  # producer can never drift from the contract without this test noticing.
+  schema="${REPO_ROOT}/contracts/metrics.schema.json"
+  run jq -e --slurpfile schema "${schema}" -s '
+    ($schema[0].items.required) as $req
+    | ($schema[0].items.properties.action.enum) as $actions
+    | all(.[]; . as $rec | ($req | all(. as $k | $rec | has($k))) and (($actions | index($rec.action)) != null))
+  ' "${metricsFile}"
+  assert_success
+}

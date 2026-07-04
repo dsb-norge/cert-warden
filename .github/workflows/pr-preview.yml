@@ -34,6 +34,9 @@ jobs:
     permissions:
       contents: write # push the preview tag
       pull-requests: write # sticky comment
+    outputs:
+      preview-ref: ${{ steps.preview.outputs.preview-ref }}
+      preview-commit: ${{ steps.preview.outputs.preview-commit }}
     steps:
       # persist-credentials is deliberately true: this job pushes the preview tag using the
       # workflow token. zizmor's artipacked audit is suppressed for this workflow in zizmor.yml.
@@ -98,6 +101,44 @@ jobs:
         with:
           header: pr-preview
           path: preview-comment.md
+
+  preview-consume-e2e:
+    name: "preview-consume-e2e"
+    # Remote-fetch e2e (docs/testing.md L3b): dispatch preview-consume.yml AT the preview tag —
+    # its internal refs are rewritten to the tag, so this run consumes the PR's actions and
+    # reusable workflows through GitHub's real remote-fetch path, exactly like a calling repo.
+    needs: publish-preview
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write # dispatch + watch the consumed run
+    steps:
+      - name: Dispatch preview-consume at the preview tag and await conclusion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PREVIEW_REF: ${{ needs.publish-preview.outputs.preview-ref }}
+          PREVIEW_COMMIT: ${{ needs.publish-preview.outputs.preview-commit }}
+        run: |
+          gh workflow run preview-consume.yml --repo "${REPO}" --ref "refs/tags/${PREVIEW_REF}"
+
+          # Find the dispatched run (head SHA = the generated preview commit), then await it.
+          runId=""
+          for _ in $(seq 1 24); do
+            sleep 5
+            runId=$(gh run list --repo "${REPO}" --workflow preview-consume.yml \
+              --json databaseId,headSha --limit 10 |
+              jq -r --arg sha "${PREVIEW_COMMIT}" '[.[] | select(.headSha == $sha)][0].databaseId // empty')
+            [[ -n "${runId}" ]] && break
+          done
+          if [[ -z "${runId}" ]]; then
+            echo "::error::preview-consume run did not appear for ${PREVIEW_REF} (${PREVIEW_COMMIT})"
+            exit 1
+          fi
+          echo "Watching preview-consume run ${runId} at ${PREVIEW_REF}"
+          gh run watch --repo "${REPO}" "${runId}" --exit-status --interval 10
 
   cleanup-preview:
     name: "delete preview tag"

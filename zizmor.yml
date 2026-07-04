@@ -1,6 +1,18 @@
 # zizmor configuration — suppressions require a written justification here and are reviewed
 # like code. See docs/security-tooling.md.
 rules:
+  unpinned-uses:
+    config:
+      policies:
+        # Internal refs are deliberately TAG-pinned (design D-6): release-please bumps them at
+        # release time and the PR preview mechanism rewrites them to preview tags. SHA-pinning
+        # them would break both. Everything else must be hash-pinned.
+        "dsb-norge/cert-warden/*": ref-pin
+        "*": hash-pin
+  github-env:
+    # setup-lego appends a runner.temp-derived dir to GITHUB_PATH — not attacker-influenced.
+    ignore:
+      - action.yml # zizmor matches by file basename; only setup-lego writes env files today
   artipacked:
     # These two workflows intentionally keep checkout credentials because they push:
     #   - pr-preview.yml pushes the preview/pr-<N> tag with the workflow token

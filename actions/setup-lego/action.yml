@@ -45,6 +45,6 @@ runs:
       env:
         LEGO_BIN_DIR: ${{ runner.temp }}/cw-lego-bin
       run: |
-        echo "${LEGO_BIN_DIR}" >>"${GITHUB_PATH}"
+        echo "${LEGO_BIN_DIR}" >>"${GITHUB_PATH}" # zizmor: ignore[github-env] runner-temp path, not attacker-influenced
         "${LEGO_BIN_DIR}/lego" --version
         echo "lego-path=${LEGO_BIN_DIR}/lego" >>"${GITHUB_OUTPUT}"

@@ -1,0 +1,10 @@
+# Conventional-commit rules — load-bearing: release-please derives versions and the public
+# CHANGELOG from commit messages, and this repo merges with merge commits (never squash), so
+# every commit must parse. CI runs this via wagoid/commitlint-github-action; install the local
+# hook with scripts/install-git-hooks.sh.
+extends:
+  - "@commitlint/config-conventional"
+rules:
+  header-max-length: [2, always, 100]
+  # Trailers and long URLs in bodies are fine; the header is what the changelog uses.
+  body-max-line-length: [0, always, 100]

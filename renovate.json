@@ -1,0 +1,28 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Renovate for cert-warden: bump pinned third-party actions (SHA+comment), tool versions via regex annotations, and harness container images. Internal dsb-norge/cert-warden refs are release-please's job — never Renovate's.",
+  "extends": [
+    ":semanticCommits",
+    ":prConcurrentLimit10",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "enabledManagers": ["github-actions", "docker-compose", "custom.regex"],
+  "ignoreDeps": ["dsb-norge/cert-warden"],
+  "labels": ["dependencies"],
+  "prHourlyLimit": 4,
+  "timezone": "UTC",
+  "schedule": ["after 03:30am and before 7:30am"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Tool versions declared as env vars/inputs annotated with `# renovate: datasource=... depName=...` on the preceding line.",
+      "fileMatch": [
+        "^\\.github/workflows/.+\\.ya?ml$",
+        "^actions/.+/action\\.ya?ml$"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z0-9-]+?) depName=(?<depName>[^\\s]+?)(?: versioning=(?<versioning>[^\\s]+?))?\\n\\s*[A-Za-z0-9_-]+:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?\\s"
+      ]
+    }
+  ]
+}

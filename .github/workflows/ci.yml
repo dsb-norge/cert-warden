@@ -1,0 +1,295 @@
+name: CI
+#
+# The repo's own CI. Layered per docs/testing.md:
+#   L0 static  — shellcheck, shfmt, actionlint, yamllint, zizmor, pinact, commitlint,
+#                private-reference guard (this file, always fast)
+#   L1 unit    — bats suites (added with the scripts)
+#   L2/L3      — integration harness and workflow self-tests (added with the harness/actions)
+#
+# A single aggregated job, `ci-conclusion`, is the only check branch protection requires —
+# extend its `needs` list when adding jobs.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Tool versions, single source of truth for this workflow. Renovate bumps these via the
+# custom regex manager in renovate.json (see the `# renovate:` annotations).
+env:
+  # renovate: datasource=go depName=mvdan.cc/sh/v3
+  SHFMT_VERSION: "v3.9.0"
+  # renovate: datasource=go depName=github.com/rhysd/actionlint
+  ACTIONLINT_VERSION: "v1.7.12"
+  # renovate: datasource=pypi depName=yamllint
+  YAMLLINT_VERSION: "1.38.0"
+  # renovate: datasource=pypi depName=zizmor
+  ZIZMOR_VERSION: "1.26.1"
+  # renovate: datasource=go depName=github.com/suzuki-shunsuke/pinact/v4
+  PINACT_VERSION: "v4.1.0"
+
+# Default-deny; each job grants only what it needs.
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint-shell:
+    name: "shellcheck + shfmt"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install shfmt
+        run: go install "mvdan.cc/sh/v3/cmd/shfmt@${SHFMT_VERSION}"
+
+      - name: shellcheck
+        run: |
+          # .shellcheckrc provides external-sources + source-path. shellcheck >= 0.7 parses
+          # .bats files too. Empty file set is a pass (early scaffolding).
+          mapfile -t files < <(git ls-files '*.sh' '*.bash' '*.bats')
+          if ((${#files[@]} == 0)); then
+            echo "no shell files yet"
+            exit 0
+          fi
+          shellcheck --version | head -2
+          shellcheck "${files[@]}"
+
+      - name: shfmt (diff mode)
+        run: |
+          # shfmt reads .editorconfig natively; -d exits non-zero when formatting differs.
+          "$(go env GOPATH)/bin/shfmt" -d .
+
+  lint-workflows:
+    name: "actionlint"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install and run actionlint
+        run: |
+          # actionlint validates expressions, action inputs, local reusable-workflow targets,
+          # and runs shellcheck over inline `run:` blocks (shellcheck is preinstalled on
+          # ubuntu-latest).
+          go install "github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+          "$(go env GOPATH)/bin/actionlint" -color
+
+  lint-yaml:
+    name: "yamllint"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install and run yamllint
+        run: |
+          pip install --quiet "yamllint==${YAMLLINT_VERSION}"
+          yamllint --strict .
+
+  security-zizmor:
+    name: "zizmor"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write # SARIF upload to code scanning
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        run: pip install --quiet "zizmor==${ZIZMOR_VERSION}"
+
+      - name: Run zizmor (gate)
+        # Non-zero exit on findings fails the job; suppressions live in zizmor.yml with a
+        # written justification each (see docs/security-tooling.md).
+        run: zizmor --no-progress .
+
+      - name: Run zizmor (SARIF)
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        run: zizmor --no-progress --format sarif . > zizmor.sarif || true
+
+      - name: Upload SARIF
+        if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
+        with:
+          sarif_file: zizmor.sarif
+          category: zizmor
+
+  pin-check:
+    name: "pinact (action pinning)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install and run pinact
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          # Verifies every `uses:` in workflows AND composite action.yml files is pinned to a
+          # full-length SHA with a version comment. --check: report, don't rewrite.
+          go install "github.com/suzuki-shunsuke/pinact/v4/cmd/pinact@${PINACT_VERSION}"
+          "$(go env GOPATH)/bin/pinact" run --check
+
+  commitlint:
+    name: "commitlint"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # sticky explainer comment
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # commitlint needs history to lint the commit range
+
+      - name: Lint commits
+        id: commitlint
+        continue-on-error: true # the job fails at the end; first we build the explainer
+        uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
+        with:
+          configFile: .commitlintrc.yml
+
+      - name: Compose explainer comment
+        id: compose
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          COMMITLINT_OUTCOME: ${{ steps.commitlint.outcome }}
+          COMMITLINT_RESULTS: ${{ steps.commitlint.outputs.results }}
+        with:
+          script: |
+            const fs = require('fs');
+            const outcome = process.env.COMMITLINT_OUTCOME;
+            if (outcome === 'success') {
+              fs.writeFileSync('commitlint-comment.md',
+                '### ✅ Conventional commits\n\nAll commits on this PR parse cleanly. ' +
+                'This comment updates automatically.\n');
+              return;
+            }
+            let results = [];
+            try { results = JSON.parse(process.env.COMMITLINT_RESULTS || '[]'); } catch (e) {}
+            const bad = results.filter(r => !r.valid);
+            const rows = bad.map(r => {
+              const problems = [...(r.errors || []), ...(r.warnings || [])].join('<br>');
+              const subject = (r.message || '').split('\n')[0];
+              return `| \`${(r.hash || '').slice(0, 7)}\` | \`${subject.replace(/\|/g, '\\|')}\` | ${problems} |`;
+            }).join('\n');
+            const body = [
+              '### ❌ Conventional commits check failed',
+              '',
+              'This repo releases automatically from commit messages ([release-please]), so **every**',
+              'commit on `main` must follow [Conventional Commits] — and this repo merges with merge',
+              'commits (never squash), so every commit on the PR must parse.',
+              '',
+              '| Commit | Subject | Problem |',
+              '| --- | --- | --- |',
+              rows || '| _(could not parse results — see the commitlint job log)_ | | |',
+              '',
+              '<details><summary><b>Cheat sheet</b></summary>',
+              '',
+              '| Prefix | Meaning | Release effect |',
+              '| --- | --- | --- |',
+              '| `feat: …` | new capability | minor bump |',
+              '| `fix: …` | bug fix | patch bump |',
+              '| `feat!: …` or `BREAKING CHANGE:` footer | breaking change | major bump |',
+              '| `docs:` `test:` `ci:` `chore:` `refactor:` `build:` `perf:` | everything else | no release |',
+              '',
+              'Example: `feat: add sweeper spike guard override`',
+              '',
+              '</details>',
+              '',
+              '**How to fix** (rewords the bad commits, keeps your changes):',
+              '```bash',
+              'git rebase -i origin/main   # change "pick" to "reword" on the flagged commits',
+              'git push --force-with-lease',
+              '```',
+              '',
+              'See `docs/development-and-ci.md` for details.',
+              '',
+              '[release-please]: https://github.com/googleapis/release-please',
+              '[Conventional Commits]: https://www.conventionalcommits.org/en/v1.0.0/',
+            ].join('\n');
+            fs.writeFileSync('commitlint-comment.md', body);
+
+      - name: Upsert sticky comment
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: commitlint
+          path: commitlint-comment.md
+
+      - name: Fail if commitlint failed
+        if: steps.commitlint.outcome == 'failure'
+        run: |
+          echo "::error::One or more commit messages are not valid conventional commits (see the sticky PR comment)."
+          exit 1
+
+  private-ref-guard:
+    name: "private-reference guard"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Check for references to private repositories
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/ci/check-private-references.sh
+
+  ci-conclusion:
+    name: "ci-conclusion"
+    # The single required status check. Fails if any needed job failed or was cancelled;
+    # skipped jobs (e.g. fork-guarded steps) are acceptable.
+    if: always()
+    needs:
+      - lint-shell
+      - lint-workflows
+      - lint-yaml
+      - security-zizmor
+      - pin-check
+      - commitlint
+      - private-ref-guard
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Evaluate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "${NEEDS_JSON}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(echo "${NEEDS_JSON}" | jq -r '[to_entries[] | select(.value.result == "failure" or .value.result == "cancelled")] | length')
+          if [[ "${bad}" != "0" ]]; then
+            echo "::error::${bad} job(s) failed or were cancelled."
+            exit 1
+          fi
+          echo "All jobs green."

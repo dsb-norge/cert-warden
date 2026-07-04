@@ -1,0 +1,12 @@
+# zizmor configuration — suppressions require a written justification here and are reviewed
+# like code. See docs/security-tooling.md.
+rules:
+  artipacked:
+    # These two workflows intentionally keep checkout credentials because they push:
+    #   - pr-preview.yml pushes the preview/pr-<N> tag with the workflow token
+    #   - release-please.yml pushes the floating major tag with the release App token
+    # Neither runs untrusted code: both operate on same-repo refs only (fork PRs are guarded
+    # out), and no build/test step executes within them.
+    ignore:
+      - pr-preview.yml
+      - release-please.yml

@@ -1,0 +1,74 @@
+name: release-please
+#
+# Release automation. Pushes to main accumulate into a single release PR (changelog + version
+# bumps + `x-release-please-version` annotated refs); merging that PR tags vX.Y.Z, publishes
+# the GitHub Release, and moves the floating major tag (plain tag — NEVER a Release object,
+# so it stays movable with immutable releases enabled).
+#
+# Token: a GitHub App (NOT GITHUB_TOKEN), for two hard reasons:
+#   1. The release PR edits files under .github/workflows/ (annotated internal refs), which
+#      requires the App's `workflows: write` permission — GITHUB_TOKEN cannot get it.
+#   2. App-created PRs trigger CI normally; GITHUB_TOKEN-created ones would not.
+# The whole job no-ops (skips) until the App is configured:
+#   - repo variable  RELEASE_APP_ID          (the App's numeric id)
+#   - repo secret    RELEASE_APP_PRIVATE_KEY (the App's PEM private key)
+# The App also needs to be a bypass actor on the "protect-release-tags" ruleset, or the
+# major-tag move below is rejected.
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release-please:
+    # Skip cleanly until the release App is provisioned (repo variable unset -> no-op).
+    if: vars.RELEASE_APP_ID != ''
+    runs-on: ubuntu-latest
+    permissions: {} # everything runs on the App token
+    steps:
+      - name: Mint App token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          # Downscope the token to exactly what the release flow needs (zizmor: github-app).
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-workflows: write
+
+      - name: release-please
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Checkout (for tag move)
+        if: ${{ steps.release.outputs.release_created }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 0
+
+      - name: Move floating major tag
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          MAJOR: ${{ steps.release.outputs.major }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          # Plain annotated tag, force-moved on every release. Never create a GitHub Release
+          # for vN — with immutable releases enabled that would freeze it permanently.
+          git config user.name "cert-warden-release[bot]"
+          git config user.email "cert-warden-release[bot]@users.noreply.github.com"
+          git tag -fa "v${MAJOR}" -m "Release ${TAG} (floating major tag v${MAJOR})" "refs/tags/${TAG}^{}"
+          git push --force origin "refs/tags/v${MAJOR}"
+          echo "Moved v${MAJOR} to ${TAG}."

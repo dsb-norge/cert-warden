@@ -1,0 +1,201 @@
+name: reusable-monitor
+#
+# The packaged monitor shape: resolve which warden run to evaluate (the triggering
+# workflow_run, or the latest run that actually ran), download its metrics artifact, evaluate
+# the lifetime-fraction SLO, and — when the bot inputs are provided — notify the Teams
+# Notification Bot. Without the bot inputs (and monitor-client-id) it is EVALUATE-ONLY and
+# needs no Azure at all; use the outputs to roll your own delivery (unsupported, but enabled).
+#
+# Caller permissions needed: contents: read is NOT needed (no checkout); actions: read (list
+# runs + download artifacts); id-token: write only when monitor-client-id is set.
+#
+# The monitor never fails the calling workflow on an evaluation outcome.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Environment label; also selects the metrics artifact (cert-warden-metrics-<environment>-*)."
+        type: string
+        required: true
+      runs-on:
+        description: "Runner label (GitHub-hosted works for evaluate-only; bot delivery may need a network path)."
+        type: string
+        required: false
+        default: "ubuntu-latest"
+      warden-workflow-name:
+        description: "Name of the caller's warden workflow (workflow names are caller-owned — this is the contract)."
+        type: string
+        required: false
+        default: "Cert Warden"
+      azure-tenant-id:
+        description: "Azure tenant id (only needed with monitor-client-id)."
+        type: string
+        required: false
+        default: ""
+      monitor-client-id:
+        description: "Client id of the monitor identity (token for the bot audience). Empty => evaluate-only."
+        type: string
+        required: false
+        default: ""
+      warn-threshold:
+        description: "min_lifetime_fraction WARNING level."
+        type: string
+        required: false
+        default: "0.40"
+      page-threshold:
+        description: "min_lifetime_fraction CRITICAL level."
+        type: string
+        required: false
+        default: "0.15"
+      liveness-window-hours:
+        description: "Max tolerated metrics age (hours) before the liveness check warns."
+        type: string
+        required: false
+        default: "36"
+      bot-api-base:
+        description: "Bot API base URL; empty => evaluate-only."
+        type: string
+        required: false
+        default: ""
+      bot-api-audience:
+        description: "Bot API token audience (api://…)."
+        type: string
+        required: false
+        default: ""
+      bot-alias:
+        description: "Bot alias to notify."
+        type: string
+        required: false
+        default: ""
+      force-notify:
+        description: "Post even when severity is OK (delivery test)."
+        type: boolean
+        required: false
+        default: false
+      dry-run:
+        description: "Evaluate and log, never POST."
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      severity:
+        description: "OK | WARNING | CRITICAL."
+        value: ${{ jobs.monitor.outputs.severity }}
+      min-lifetime-fraction:
+        description: "The SLO number (may be null)."
+        value: ${{ jobs.monitor.outputs.min-lifetime-fraction }}
+      managed-count:
+        description: "Managed certs evaluated."
+        value: ${{ jobs.monitor.outputs.managed-count }}
+      failed-count:
+        description: "Managed zones reporting an error."
+        value: ${{ jobs.monitor.outputs.failed-count }}
+      reasons-json:
+        description: "JSON array of alert reasons."
+        value: ${{ jobs.monitor.outputs.reasons-json }}
+      notified:
+        description: "true when a notification was accepted by the bot."
+        value: ${{ jobs.monitor.outputs.notified }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  monitor:
+    name: "monitor (${{ inputs.environment }})"
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      severity: ${{ steps.monitor.outputs.severity }}
+      min-lifetime-fraction: ${{ steps.monitor.outputs.min-lifetime-fraction }}
+      managed-count: ${{ steps.monitor.outputs.managed-count }}
+      failed-count: ${{ steps.monitor.outputs.failed-count }}
+      reasons-json: ${{ steps.monitor.outputs.reasons-json }}
+      notified: ${{ steps.monitor.outputs.notified }}
+    steps:
+      - name: Azure login (bot-token identity)
+        if: inputs.monitor-client-id != ''
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          client-id: ${{ inputs.monitor-client-id }}
+          # The monitor identity holds no subscription RBAC by design — it only mints a token
+          # for the bot API audience. Without this, az login fails subscription discovery.
+          allow-no-subscriptions: true
+
+      - name: Resolve warden run
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_NAME: ${{ inputs.warden-workflow-name }}
+          REPO: ${{ github.repository }}
+          WR_ID: ${{ github.event.workflow_run.id }}
+          WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          WR_URL: ${{ github.event.workflow_run.html_url }}
+          WR_UPDATED: ${{ github.event.workflow_run.updated_at }}
+        run: |
+          # Triggered by workflow_run: evaluate exactly that run. Scheduled/manual: take the
+          # most recent run that ACTUALLY ran (success or failure) — skipped runs (deploy
+          # gating) produce no metrics and are not a renewal signal. Fall back to the newest
+          # completed run, and to "nothing found" (the monitor treats absence as a signal).
+          if [[ "${EVENT_NAME}" == "workflow_run" && -n "${WR_ID}" ]]; then
+            runId="${WR_ID}"; conclusion="${WR_CONCLUSION}"; runUrl="${WR_URL}"; updatedAt="${WR_UPDATED}"
+          else
+            read -r runId conclusion updatedAt runUrl < <(gh run list \
+              --repo "${REPO}" \
+              --workflow "${WORKFLOW_NAME}" --status completed --limit 20 \
+              --json databaseId,conclusion,updatedAt,url \
+              --jq '([.[] | select(.conclusion == "success" or .conclusion == "failure")] + .)[0]
+                    | "\(.databaseId) \(.conclusion) \(.updatedAt) \(.url)"') || true
+          fi
+          {
+            echo "run-id=${runId:-}"
+            echo "conclusion=${conclusion:-}"
+            echo "run-url=${runUrl:-}"
+            echo "updated-at=${updatedAt:-}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "Resolved warden run '${runId:-none}' (${conclusion:-n/a}) updated ${updatedAt:-n/a}"
+
+      - name: Download metrics artifact
+        if: steps.resolve.outputs.run-id != ''
+        continue-on-error: true # absent metrics is itself a signal the monitor handles
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          run-id: ${{ steps.resolve.outputs.run-id }}
+          github-token: ${{ github.token }}
+          pattern: "cert-warden-metrics-${{ inputs.environment }}-*"
+          merge-multiple: true
+          path: ${{ runner.temp }}/cw-metrics
+
+      - name: Compute metrics age
+        id: age
+        env:
+          UPDATED_AT: ${{ steps.resolve.outputs.updated-at }}
+        run: |
+          age=""
+          if [[ -n "${UPDATED_AT}" && "${UPDATED_AT}" != "null" ]]; then
+            updatedEpoch=$(date -u -d "${UPDATED_AT}" +%s)
+            nowEpoch=$(date -u +%s)
+            age=$(((nowEpoch - updatedEpoch) / 3600))
+          fi
+          echo "hours=${age}" >>"${GITHUB_OUTPUT}"
+
+      - name: Evaluate and notify
+        id: monitor
+        uses: dsb-norge/cert-warden/actions/monitor@v0.0.0 # x-release-please-version
+        with:
+          metrics-file: "${{ runner.temp }}/cw-metrics/cert-warden-metrics-${{ inputs.environment }}.json"
+          environment-label: ${{ inputs.environment }}
+          warn-threshold: ${{ inputs.warn-threshold }}
+          page-threshold: ${{ inputs.page-threshold }}
+          liveness-window-hours: ${{ inputs.liveness-window-hours }}
+          warden-conclusion: ${{ steps.resolve.outputs.conclusion }}
+          warden-run-url: ${{ steps.resolve.outputs.run-url }}
+          metrics-age-hours: ${{ steps.age.outputs.hours }}
+          bot-api-base: ${{ inputs.bot-api-base }}
+          bot-api-audience: ${{ inputs.bot-api-audience }}
+          bot-alias: ${{ inputs.bot-alias }}
+          force-notify: ${{ inputs.force-notify }}
+          dry-run: ${{ inputs.dry-run }}

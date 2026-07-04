@@ -8,7 +8,12 @@
     ".": {
       "package-name": "cert-warden",
       "changelog-path": "CHANGELOG.md",
-      "extra-files": []
+      "extra-files": [
+        { "type": "generic", "path": ".github/workflows/reusable-warden.yml" },
+        { "type": "generic", "path": ".github/workflows/reusable-monitor.yml" },
+        { "type": "generic", "path": ".github/workflows/reusable-sweeper.yml" },
+        { "type": "generic", "path": ".github/workflows/preview-consume.yml" }
+      ]
     }
   }
 }

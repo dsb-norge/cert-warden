@@ -1,0 +1,113 @@
+name: "cert-warden-monitor"
+description: >-
+  Evaluate a Cert Warden metrics artifact against the lifetime-fraction SLO and (optionally)
+  notify a Teams Notification Bot. Without the bot inputs the action runs in EVALUATE-ONLY
+  mode — use the generous outputs to build your own delivery. Never fails the workflow.
+
+inputs:
+  metrics-file:
+    description: "Path to the metrics JSON (may be absent/empty — absence is itself a signal)."
+    required: false
+    default: ""
+  environment-label:
+    description: "Label for summaries/cards (e.g. dev/test/prod)."
+    required: false
+    default: "unknown"
+  warn-threshold:
+    description: "min_lifetime_fraction WARNING level."
+    required: false
+    default: "0.40"
+  page-threshold:
+    description: "min_lifetime_fraction CRITICAL level."
+    required: false
+    default: "0.15"
+  liveness-window-hours:
+    description: "Max tolerated metrics age before the liveness check warns."
+    required: false
+    default: "36"
+  warden-conclusion:
+    description: "Conclusion of the triggering warden run (success/failure/empty)."
+    required: false
+    default: ""
+  warden-run-url:
+    description: "Link to the triggering warden run (for the card)."
+    required: false
+    default: ""
+  metrics-age-hours:
+    description: "Age of the metrics in hours (liveness check input)."
+    required: false
+    default: ""
+  bot-api-base:
+    description: "Teams Notification Bot API base (e.g. https://<func>.azurewebsites.net/api). Empty => evaluate-only."
+    required: false
+    default: ""
+  bot-api-audience:
+    description: "Token audience of the bot API app (api://…). Requires an az login able to mint it."
+    required: false
+    default: ""
+  bot-alias:
+    description: "Bot alias to notify."
+    required: false
+    default: ""
+  force-notify:
+    description: "true posts even when severity is OK (delivery test)."
+    required: false
+    default: "false"
+  dry-run:
+    description: "true evaluates and logs the payload but never POSTs."
+    required: false
+    default: "false"
+
+outputs:
+  severity:
+    description: "OK | WARNING | CRITICAL."
+    value: ${{ steps.run.outputs.severity }}
+  min-lifetime-fraction:
+    description: "The SLO number (may be null)."
+    value: ${{ steps.run.outputs.min-lifetime-fraction }}
+  managed-count:
+    description: "Managed certs evaluated."
+    value: ${{ steps.run.outputs.managed-count }}
+  failed-count:
+    description: "Managed zones reporting an error."
+    value: ${{ steps.run.outputs.failed-count }}
+  worst-zone:
+    description: "Zone with the lowest remaining lifetime."
+    value: ${{ steps.run.outputs.worst-zone }}
+  reasons-json:
+    description: "JSON array of alert reasons."
+    value: ${{ steps.run.outputs.reasons-json }}
+  notified:
+    description: "true when a notification was accepted by the bot."
+    value: ${{ steps.run.outputs.notified }}
+  notify-http-status:
+    description: "HTTP status of the delivery attempt (empty when none)."
+    value: ${{ steps.run.outputs.notify-http-status }}
+
+runs:
+  using: composite
+  steps:
+    - name: Evaluate and notify
+      id: run
+      shell: bash
+      env:
+        CW_ACTION_NAME: monitor
+        METRICS_FILE: ${{ inputs.metrics-file }}
+        ENV_NAME: ${{ inputs.environment-label }}
+        WARN_THRESHOLD: ${{ inputs.warn-threshold }}
+        PAGE_THRESHOLD: ${{ inputs.page-threshold }}
+        LIVENESS_WINDOW_HOURS: ${{ inputs.liveness-window-hours }}
+        CERT_WARDEN_CONCLUSION: ${{ inputs.warden-conclusion }}
+        CERT_WARDEN_RUN_URL: ${{ inputs.warden-run-url }}
+        METRICS_AGE_HOURS: ${{ inputs.metrics-age-hours }}
+        BOT_API_BASE: ${{ inputs.bot-api-base }}
+        BOT_API_AUDIENCE: ${{ inputs.bot-api-audience }}
+        BOT_ALIAS: ${{ inputs.bot-alias }}
+        FORCE_NOTIFY: ${{ inputs.force-notify }}
+        DRY_RUN: ${{ inputs.dry-run }}
+      run: |
+        set -o allexport
+        # shellcheck source=../../lib/helpers.bash
+        source "${GITHUB_ACTION_PATH}/../../lib/helpers.bash"
+        set +o allexport
+        bash "${GITHUB_ACTION_PATH}/monitor.sh"

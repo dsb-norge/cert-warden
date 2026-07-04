@@ -1,0 +1,161 @@
+name: reusable-warden
+#
+# The packaged warden shape: OIDC login -> setup-lego -> issue/renew into Key Vault -> upload
+# the metrics artifact. One environment per call — put your matrix in the caller (with
+# max-parallel: 1 for Let's Encrypt hygiene) and share a concurrency group with the sweeper
+# per environment. See docs/reference-usage.md for canonical callers and
+# docs/consumer-prerequisites.md for the Azure-side requirements.
+#
+# Caller permissions needed: id-token: write (OIDC login). Nothing else — this workflow never
+# checks out the calling repo.
+#
+# Inputs are configuration, not behaviour flags (design rule D-18): if you need a different
+# shape, compose the actions (dsb-norge/cert-warden/actions/*) in your own workflow instead.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Environment label (used in artifact names and summaries)."
+        type: string
+        required: true
+      runs-on:
+        description: "Runner label (a self-hosted runner with a network path to the Key Vault)."
+        type: string
+        required: true
+      azure-tenant-id:
+        description: "Azure tenant id."
+        type: string
+        required: true
+      azure-subscription-id:
+        description: "Azure subscription id."
+        type: string
+        required: true
+      azure-client-id:
+        description: "Client id of the cert-maintainer identity (federated credential on this repo+ref)."
+        type: string
+        required: true
+      key-vault-name:
+        description: "The web-certs Key Vault."
+        type: string
+        required: true
+      dns-rg-name:
+        description: "Resource group holding the public DNS zones."
+        type: string
+        required: true
+      le-environment:
+        description: "Let's Encrypt environment: staging or production. Start new consumers on staging."
+        type: string
+        required: false
+        default: "staging"
+      le-account-email:
+        description: "Email for NEW LE account registration."
+        type: string
+        required: true
+      lego-version:
+        description: "Override the pinned lego version."
+        type: string
+        required: false
+        # renovate: datasource=go depName=github.com/go-acme/lego/v5
+        default: "v5.2.2"
+      force-all-new:
+        description: "Force new certificates for all zones."
+        type: boolean
+        required: false
+        default: false
+      force-renewal:
+        description: "Force renewal of existing certificates."
+        type: boolean
+        required: false
+        default: false
+      tag-application-name:
+        description: "ApplicationName tag on Key Vault objects."
+        type: string
+        required: true
+      tag-created-by:
+        description: "CreatedBy tag; conventionally the calling repo URL."
+        type: string
+        required: false
+        default: "https://github.com/${{ github.repository }}"
+      metrics-retention-days:
+        description: "Retention for the metrics artifact."
+        type: number
+        required: false
+        default: 90
+    outputs:
+      metrics-artifact-name:
+        description: "Name of the uploaded metrics artifact."
+        value: ${{ jobs.warden.outputs.metrics-artifact-name }}
+      zones-total:
+        description: "Total zones enumerated."
+        value: ${{ jobs.warden.outputs.zones-total }}
+      zones-managed:
+        description: "Managed (delegated) zones."
+        value: ${{ jobs.warden.outputs.zones-managed }}
+      zones-failed:
+        description: "Zones with a failed certificate action."
+        value: ${{ jobs.warden.outputs.zones-failed }}
+      min-lifetime-fraction:
+        description: "The SLO number (may be null)."
+        value: ${{ jobs.warden.outputs.min-lifetime-fraction }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  warden:
+    name: "warden (${{ inputs.environment }})"
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      metrics-artifact-name: ${{ steps.names.outputs.artifact }}
+      zones-total: ${{ steps.warden.outputs.zones-total }}
+      zones-managed: ${{ steps.warden.outputs.zones-managed }}
+      zones-failed: ${{ steps.warden.outputs.zones-failed }}
+      min-lifetime-fraction: ${{ steps.warden.outputs.min-lifetime-fraction }}
+    steps:
+      - name: Azure login
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+          client-id: ${{ inputs.azure-client-id }}
+
+      - name: Setup lego
+        uses: dsb-norge/cert-warden/actions/setup-lego@v0.0.0 # x-release-please-version
+        with:
+          lego-version: ${{ inputs.lego-version }}
+
+      - name: Derive artifact name
+        id: names
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          echo "artifact=cert-warden-metrics-${ENVIRONMENT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
+          echo "metrics-file=${RUNNER_TEMP}/cert-warden-metrics-${ENVIRONMENT}.json" >>"${GITHUB_OUTPUT}"
+
+      - name: Maintain certificates
+        id: warden
+        uses: dsb-norge/cert-warden/actions/warden@v0.0.0 # x-release-please-version
+        with:
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+          dns-rg-name: ${{ inputs.dns-rg-name }}
+          key-vault-name: ${{ inputs.key-vault-name }}
+          le-environment: ${{ inputs.le-environment }}
+          le-account-email: ${{ inputs.le-account-email }}
+          force-all-new: ${{ inputs.force-all-new }}
+          force-renewal: ${{ inputs.force-renewal }}
+          tag-application-name: ${{ inputs.tag-application-name }}
+          tag-created-by: ${{ inputs.tag-created-by }}
+          metrics-output-file: ${{ steps.names.outputs.metrics-file }}
+
+      - name: Upload metrics artifact
+        # always(): the metrics matter MOST when the run reported cert errors.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.names.outputs.artifact }}
+          path: ${{ steps.names.outputs.metrics-file }}
+          if-no-files-found: warn
+          retention-days: ${{ inputs.metrics-retention-days }}

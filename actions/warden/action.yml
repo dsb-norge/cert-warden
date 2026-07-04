@@ -1,0 +1,109 @@
+name: "cert-warden"
+description: >-
+  Issue/renew Let's Encrypt certificates for the delegated public DNS zones in an Azure
+  resource group and import them into Azure Key Vault (DNS-01 via lego, ARI-driven renewal).
+  Assumes: az login done (OIDC) and lego on PATH (actions/setup-lego). Docs: docs/reference-usage.md.
+
+inputs:
+  tenant-id:
+    description: "Azure tenant id."
+    required: true
+  subscription-id:
+    description: "Azure subscription id holding the DNS zones and the Key Vault."
+    required: true
+  dns-rg-name:
+    description: "Resource group containing the public DNS zones."
+    required: true
+  key-vault-name:
+    description: "Key Vault (RBAC) receiving certificates, LE account material and ARI metadata."
+    required: true
+  le-environment:
+    description: "Let's Encrypt environment: staging or production. Start every new consumer on staging."
+    required: false
+    default: "staging"
+  le-account-email:
+    description: "Email for NEW Let's Encrypt account registration (existing account in KV wins)."
+    required: true
+  force-all-new:
+    description: "true forces new certificates for all zones."
+    required: false
+    default: "false"
+  force-renewal:
+    description: "true forces renewal of existing certificates."
+    required: false
+    default: "false"
+  tag-application-name:
+    description: "ApplicationName tag applied to Key Vault certificate objects."
+    required: true
+  tag-created-by:
+    description: "CreatedBy tag (conventionally the calling repo URL)."
+    required: true
+  tag-description:
+    description: "Description tag."
+    required: false
+    default: "This certificate is managed by Cert Warden. Do not delete or modify manually."
+  metrics-output-file:
+    description: "Path for the per-cert metrics JSON artifact."
+    required: false
+    default: ""
+
+outputs:
+  metrics-file:
+    description: "Path of the metrics JSON (written even when the run fails partially)."
+    value: ${{ steps.run.outputs.metrics-file }}
+  zones-total:
+    description: "Total zones enumerated."
+    value: ${{ steps.run.outputs.zones-total }}
+  zones-managed:
+    description: "Zones with a managed certificate (delegated)."
+    value: ${{ steps.run.outputs.zones-managed }}
+  zones-failed:
+    description: "Zones whose certificate action failed this run."
+    value: ${{ steps.run.outputs.zones-failed }}
+  min-lifetime-fraction:
+    description: "Lowest remaining-lifetime fraction across managed certs (the SLO number; may be null)."
+    value: ${{ steps.run.outputs.min-lifetime-fraction }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run cert maintenance
+      id: run
+      shell: bash
+      env:
+        CW_ACTION_NAME: warden
+        AZ_TENANT_ID: ${{ inputs.tenant-id }}
+        AZ_SUBSCRIPTION_ID: ${{ inputs.subscription-id }}
+        AZ_DNS_RG_NAME: ${{ inputs.dns-rg-name }}
+        AZ_CERT_KV_NAME: ${{ inputs.key-vault-name }}
+        LE_ENVIRONMENT_NAME: ${{ inputs.le-environment }}
+        LE_NEW_ACCOUNT_EMAIL: ${{ inputs.le-account-email }}
+        CERT_FORCE_ALL_NEW: ${{ inputs.force-all-new }}
+        CERT_FORCE_RENEWAL: ${{ inputs.force-renewal }}
+        CERT_AZ_RESOURCE_TAG_ApplicationName: ${{ inputs.tag-application-name }}
+        CERT_AZ_RESOURCE_TAG_CreatedBy: ${{ inputs.tag-created-by }}
+        CERT_AZ_RESOURCE_TAG_Description: ${{ inputs.tag-description }}
+        METRICS_INPUT: ${{ inputs.metrics-output-file }}
+      run: |
+        set -o allexport
+        # shellcheck source=../../lib/helpers.bash
+        source "${GITHUB_ACTION_PATH}/../../lib/helpers.bash"
+        set +o allexport
+
+        export CERT_METRICS_OUTPUT_FILE="${METRICS_INPUT:-${RUNNER_TEMP}/cert-warden-metrics.json}"
+
+        # Run the engine; capture the exit code so outputs are emitted even on partial failure
+        # (a failed zone must still produce metrics — that is the product's core guarantee).
+        rc=0
+        bash "${GITHUB_ACTION_PATH}/cert-warden.sh" || rc=$?
+
+        set-output "metrics-file" "${CERT_METRICS_OUTPUT_FILE}"
+        if [[ -s "${CERT_METRICS_OUTPUT_FILE}" ]]; then
+          set-output "zones-total" "$(jq 'length' "${CERT_METRICS_OUTPUT_FILE}")"
+          set-output "zones-managed" "$(jq '[.[] | select(.action != "not_delegated")] | length' "${CERT_METRICS_OUTPUT_FILE}")"
+          set-output "zones-failed" "$(jq '[.[] | select(.action == "failed")] | length' "${CERT_METRICS_OUTPUT_FILE}")"
+          minFraction="$(jq '[.[] | .lifetime_fraction_remaining // empty]
+            | if length > 0 then min else null end' "${CERT_METRICS_OUTPUT_FILE}")"
+          set-output "min-lifetime-fraction" "${minFraction}"
+        fi
+        exit "${rc}"

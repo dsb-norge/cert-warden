@@ -165,6 +165,19 @@ del_secrets=("${del_secrets_filtered[@]+"${del_secrets_filtered[@]}"}")
 total=$((${#del_certs[@]} + ${#del_secrets[@]}))
 log-info "Candidates: ${#del_certs[@]} certificate(s) + ${#del_secrets[@]} secret(s) = ${total} total."
 
+# Generous outputs (D-14): callers can gate/report on the evaluation regardless of mode.
+# deleted-count is re-emitted after a destructive pass (last occurrence wins).
+if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+  {
+    echo "candidates-count=${total}"
+    echo "candidates-json=$(jq -nc \
+      --argjson certs "$(printf '%s\n' "${del_certs[@]+"${del_certs[@]}"}" | jq -R . | jq -sc 'map(select(. != ""))')" \
+      --argjson secrets "$(printf '%s\n' "${del_secrets[@]+"${del_secrets[@]}"}" | jq -R . | jq -sc 'map(select(. != ""))')" \
+      '{certificates: $certs, secrets: $secrets}')"
+    echo "deleted-count=0"
+  } >>"${GITHUB_OUTPUT}"
+fi
+
 # --- safety cap -----------------------------------------------------------------------------
 if [[ "${total}" -gt "${MAX_DELETIONS}" ]]; then
   log-error "Candidate count ${total} exceeds MAX_DELETIONS=${MAX_DELETIONS} — aborting without deleting."
@@ -213,3 +226,4 @@ done
 end-group
 
 log-info "Soft-deleted ${deleted} object(s) from '${KV_NAME}' (recoverable for the KV soft-delete window)."
+[[ -z "${GITHUB_OUTPUT:-}" ]] || echo "deleted-count=${deleted}" >>"${GITHUB_OUTPUT}"

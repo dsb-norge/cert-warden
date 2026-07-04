@@ -150,9 +150,31 @@ echo "${_action_name}: severity=${severity}"
 } >>"${summaryFile}"
 # endregion -------------------------------------------------------------------------------------
 
+# region: outputs -------------------------------------------------------------------------------
+# Generous outputs (design decision D-14): everything a caller needs to build its own delivery
+# or gating on top of the evaluation. Emitted at every exit path; notified/notify-http-status
+# are re-emitted after a delivery attempt (last occurrence wins in GITHUB_OUTPUT).
+notified="false"
+notifyHttpStatus=""
+emitOutputs() {
+  [[ -n "${GITHUB_OUTPUT:-}" ]] || return 0
+  {
+    echo "severity=${severity}"
+    echo "min-lifetime-fraction=${minLifetimeFraction}"
+    echo "managed-count=${managedCount}"
+    echo "failed-count=${failedCount}"
+    echo "worst-zone=${worstZone}"
+    echo "reasons-json=$(printf '%s\n' "${reasons[@]:-}" | jq -R . | jq -sc 'map(select(. != ""))')"
+    echo "notified=${notified}"
+    echo "notify-http-status=${notifyHttpStatus}"
+  } >>"${GITHUB_OUTPUT}"
+}
+# endregion -------------------------------------------------------------------------------------
+
 # region: notify --------------------------------------------------------------------------------
 if [[ "${severity}" == "OK" && "${FORCE_NOTIFY}" != "true" ]]; then
   echo "${_action_name}: status OK — no notification sent (set FORCE_NOTIFY=true to test delivery)."
+  emitOutputs
   exit 0
 fi
 
@@ -212,11 +234,13 @@ payload=$(jq -n --argjson card "${card}" --arg env "${ENV_NAME}" \
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "${_action_name}: DRY_RUN — would POST to ${BOT_API_BASE}/v1/notify/${BOT_ALIAS}:"
   echo "${payload}" | jq .
+  emitOutputs
   exit 0
 fi
 
 if [[ -z "${BOT_API_BASE}" || -z "${BOT_API_AUDIENCE}" || -z "${BOT_ALIAS}" ]]; then
   echo "::error::${_action_name}: BOT_API_BASE / BOT_API_AUDIENCE / BOT_ALIAS must be set to deliver a notification."
+  emitOutputs
   exit 0
 fi
 
@@ -231,7 +255,11 @@ echo "${_action_name}: bot responded HTTP ${httpStatus}"
 cat /tmp/notify-resp.json 2>/dev/null || true
 echo "::endgroup::"
 
+notifyHttpStatus="${httpStatus}"
 if [[ "${httpStatus}" != "202" && "${httpStatus}" != "200" ]]; then
   echo "::warning::${_action_name}: notification delivery failed (HTTP ${httpStatus})."
+else
+  notified="true"
 fi
+emitOutputs
 # endregion -------------------------------------------------------------------------------------

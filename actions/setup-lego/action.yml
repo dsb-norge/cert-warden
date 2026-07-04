@@ -1,0 +1,50 @@
+name: "setup-lego"
+description: >-
+  Install the lego ACME client at a pinned version (cached) and add it to PATH.
+  Requires Go on the runner (present on GitHub-hosted images).
+
+inputs:
+  lego-version:
+    description: >-
+      lego version tag. NOTE: the Go module major (…/lego/v5) is part of the install path —
+      a future v6 needs a change here, not just a version bump.
+    required: false
+    # renovate: datasource=go depName=github.com/go-acme/lego/v5
+    default: "v5.2.2"
+
+outputs:
+  lego-path:
+    description: "Absolute path to the installed lego binary."
+    value: ${{ steps.finalize.outputs.lego-path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Cache lego
+      id: cache-lego
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/cw-lego-bin
+        key: "lego-${{ inputs.lego-version }}-${{ runner.os }}-${{ runner.arch }}"
+
+    - name: Install lego
+      if: steps.cache-lego.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        LEGO_VERSION: ${{ inputs.lego-version }}
+        GOBIN: ${{ runner.temp }}/cw-lego-bin
+      run: |
+        mkdir -p "${GOBIN}"
+        # lego v5 moved the CLI main package to the module root (v4 was .../v4/cmd/lego);
+        # Go strips the /v5 suffix when naming the binary.
+        go install "github.com/go-acme/lego/v5@${LEGO_VERSION}"
+
+    - name: Add lego to PATH
+      id: finalize
+      shell: bash
+      env:
+        LEGO_BIN_DIR: ${{ runner.temp }}/cw-lego-bin
+      run: |
+        echo "${LEGO_BIN_DIR}" >>"${GITHUB_PATH}"
+        "${LEGO_BIN_DIR}/lego" --version
+        echo "lego-path=${LEGO_BIN_DIR}/lego" >>"${GITHUB_OUTPUT}"

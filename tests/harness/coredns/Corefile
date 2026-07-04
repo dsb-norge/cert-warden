@@ -1,0 +1,11 @@
+# Authoritative DNS for the integration-test zones. Serves the NS records the warden's
+# public-delegation check (`dig NS <zone>`) compares against the az fixture's nameServers.
+# not-delegated.internal is deliberately NOT served (NXDOMAIN -> delegation check fails).
+cw-test.internal:53 {
+    file /data/cw-test.internal.zone
+    log
+}
+zone2.cw-test.internal:53 {
+    file /data/zone2.cw-test.internal.zone
+    log
+}

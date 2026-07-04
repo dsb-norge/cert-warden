@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+#
+# Stateful fake Azure CLI for the L2 integration harness. Implements exactly the subcommands
+# the suite calls (docs/testing.md lists them); everything else fails loudly so a new az call
+# in the scripts forces a conscious shim extension.
+#
+# State (CW_AZ_STATE_DIR, required):
+#   secrets/<name>            raw secret values
+#   certs/<name>.json         {"name","sans":[...],"expires","cn"} — written by `certificate import`
+#   fixtures/zones.json       output shape of: az network dns zone list -o json
+#   fixtures/recordsets-<zone>.json   output shape of: az network dns record-set list -o json
+#   calls.log                 every invocation, appended
+#
+# The one place the shim does REAL work is `keyvault certificate import`: the PFX is parsed
+# with real openssl (password included), SANs/expiry extracted from the actual certificate,
+# and — when CW_TEST_VERIFY_CHAIN_ROOT is set — the chain is verified against that root
+# (Pebble's per-boot root in the harness). The mock boundary validates the artifact.
+#
+# Fixture fidelity: the JSON/TSV shapes returned here were captured from real `az` (2.75.x)
+# output for the exact --query expressions the scripts use — do not hand-tune them.
+set -euo pipefail
+shopt -s inherit_errexit
+
+state="${CW_AZ_STATE_DIR:?CW_AZ_STATE_DIR is required by the az shim}"
+mkdir -p "${state}/secrets" "${state}/certs" "${state}/fixtures"
+echo "az $*" >>"${state}/calls.log"
+
+# --- generic arg parse ------------------------------------------------------------------------
+cmd=()
+declare -A opt=()
+while (($# > 0)); do
+  case "$1" in
+    --tags) # consumes all remaining non-flag values
+      shift
+      while (($# > 0)) && [[ "$1" != --* ]]; do shift; done
+      ;;
+    --*)
+      # Every az flag the suite uses is valued — consume the next arg UNCONDITIONALLY.
+      # (A "next arg starts with -- means boolean" heuristic corrupts PEM values, which
+      # legitimately begin with '-----BEGIN'.) Only a trailing flag falls back to boolean.
+      key="${1#--}"
+      if (($# > 1)); then
+        opt["${key}"]="$2"
+        shift 2
+      else
+        opt["${key}"]="true"
+        shift
+      fi
+      ;;
+    -o)
+      opt["output"]="$2"
+      shift 2
+      ;;
+    *)
+      cmd+=("$1")
+      shift
+      ;;
+  esac
+done
+
+fail() {
+  echo "az-shim ERROR: $*" >&2
+  exit 1
+}
+name="${opt[name]:-}"
+vault="${opt["vault-name"]:-}"
+query="${opt[query]:-}"
+
+case "${cmd[*]}" in
+  "account set")
+    exit 0
+    ;;
+
+  "account get-access-token")
+    # --query accessToken -o tsv
+    echo "az-shim-test-token"
+    ;;
+
+  "network dns zone list")
+    cat "${state}/fixtures/zones.json"
+    ;;
+
+  "network dns record-set list")
+    zone="${opt["zone-name"]:?}"
+    cat "${state}/fixtures/recordsets-${zone}.json" 2>/dev/null || echo "[]"
+    ;;
+
+  "keyvault secret show")
+    f="${state}/secrets/${name:?}"
+    if [[ ! -f "${f}" ]]; then
+      echo "az-shim: SecretNotFound: ${name} (vault ${vault})" >&2
+      exit 1
+    fi
+    if [[ "${query}" == "value" ]]; then
+      cat "${f}"
+    else
+      jq -n --arg n "${name}" --arg v "$(cat "${f}")" --arg vault "${vault}" \
+        '{id: ("https://\($vault).vault.azure.test/secrets/\($n)/0000000000000000000000000000cafe"), name: $n, value: $v}'
+    fi
+    ;;
+
+  "keyvault secret set")
+    printf '%s' "${opt[value]:?}" >"${state}/secrets/${name:?}"
+    id="https://${vault}.vault.azure.test/secrets/${name}/0000000000000000000000000000cafe"
+    if [[ "${query}" == "id" ]]; then echo "${id}"; else jq -n --arg id "${id}" '{id: $id}'; fi
+    ;;
+
+  "keyvault secret list")
+    # --query "[].name" -o tsv
+    ls -1 "${state}/secrets" 2>/dev/null || true
+    ;;
+
+  "keyvault secret delete")
+    rm -f "${state}/secrets/${name:?}"
+    ;;
+
+  "keyvault certificate show")
+    f="${state}/certs/${name:?}.json"
+    [[ -f "${f}" ]] || fail "CertificateNotFound: ${name}"
+    # --query policy.x509CertificateProperties -o json
+    jq '{subject: ("CN=" + .cn), subjectAlternativeNames: {dnsNames: .sans, emails: [], upns: []}, validityInMonths: null}' "${f}"
+    ;;
+
+  "keyvault certificate list")
+    # --query "[].{name:name, exp:attributes.expires}" -o json
+    if compgen -G "${state}/certs/*.json" >/dev/null; then
+      jq -s 'map({name: .name, exp: .expires})' "${state}"/certs/*.json
+    else
+      echo "[]"
+    fi
+    ;;
+
+  "keyvault certificate delete")
+    # Key Vault semantics: deleting a certificate also deletes its backing secret.
+    rm -f "${state}/certs/${name:?}.json" "${state}/secrets/${name}"
+    ;;
+
+  "keyvault certificate import")
+    file="${opt[file]:?}"
+    password="${opt[password]:-}"
+    [[ -f "${file}" ]] || fail "import: file not found: ${file}"
+
+    workdir="$(mktemp -d)"
+    trap 'rm -rf "${workdir}"' EXIT
+
+    # REAL validation: parse the PFX with the provided password. Go's pkcs12 writer uses
+    # legacy ciphers, so retry with -legacy for OpenSSL 3.
+    if ! openssl pkcs12 -in "${file}" -passin "pass:${password}" -nokeys -clcerts \
+      -out "${workdir}/leaf.pem" 2>/dev/null; then
+      openssl pkcs12 -legacy -in "${file}" -passin "pass:${password}" -nokeys -clcerts \
+        -out "${workdir}/leaf.pem" 2>/dev/null || fail "import: PFX unreadable with given password"
+    fi
+
+    # Chain verification against the harness CA root (Pebble's per-boot root), when provided.
+    if [[ -n "${CW_TEST_VERIFY_CHAIN_ROOT:-}" ]]; then
+      openssl pkcs12 -in "${file}" -passin "pass:${password}" -nokeys -cacerts \
+        -out "${workdir}/chain.pem" 2>/dev/null ||
+        openssl pkcs12 -legacy -in "${file}" -passin "pass:${password}" -nokeys -cacerts \
+          -out "${workdir}/chain.pem" 2>/dev/null || true
+      openssl verify -CAfile "${CW_TEST_VERIFY_CHAIN_ROOT}" -untrusted "${workdir}/chain.pem" \
+        "${workdir}/leaf.pem" >/dev/null ||
+        fail "import: certificate chain does not verify against CW_TEST_VERIFY_CHAIN_ROOT"
+      echo "az-shim: chain VERIFIED against test root" >>"${state}/calls.log"
+    fi
+
+    sans=$(openssl x509 -in "${workdir}/leaf.pem" -noout -ext subjectAltName 2>/dev/null |
+      grep -oE 'DNS:[^,[:space:]]+' | sed 's/^DNS://' | jq -R . | jq -s .)
+    expires=$(date -u -d "$(openssl x509 -in "${workdir}/leaf.pem" -noout -enddate | cut -d= -f2)" +"%Y-%m-%dT%H:%M:%S+00:00")
+    cn=$(openssl x509 -in "${workdir}/leaf.pem" -noout -subject -nameopt multiline | awk -F' = ' '/commonName/ {print $2}')
+
+    jq -n --arg n "${name:?}" --argjson sans "${sans}" --arg exp "${expires}" --arg cn "${cn:-}" \
+      '{name: $n, sans: $sans, expires: $exp, cn: $cn}' >"${state}/certs/${name}.json"
+
+    # Real Key Vault strips the import password: the cert's backing secret returns a
+    # PASSWORD-LESS PKCS#12 (the scripts extract it with `-passin pass:`). Mirror that:
+    # unpack with the given password, re-export with a blank one.
+    if ! openssl pkcs12 -in "${file}" -passin "pass:${password}" -nodes \
+      -out "${workdir}/all.pem" 2>/dev/null; then
+      openssl pkcs12 -legacy -in "${file}" -passin "pass:${password}" -nodes \
+        -out "${workdir}/all.pem" 2>/dev/null || fail "import: PFX unpack for re-export failed"
+    fi
+    openssl pkcs12 -export -in "${workdir}/all.pem" -passout pass: \
+      -out "${workdir}/kv-style.pfx" 2>/dev/null || fail "import: KV-style re-export failed"
+    base64 -w0 <"${workdir}/kv-style.pfx" >"${state}/secrets/${name}"
+
+    jq -n --arg vault "${vault}" --arg n "${name}" \
+      '{sid: ("https://\($vault).vault.azure.test/secrets/\($n)/00000000000000000000000000003p1c"),
+        cer: "elided", id: ("https://\($vault).vault.azure.test/certificates/\($n)/00000000000000000000000000003p1c")}'
+    ;;
+
+  *)
+    fail "unhandled command: ${cmd[*]} (extend the shim consciously — see docs/testing.md)"
+    ;;
+esac

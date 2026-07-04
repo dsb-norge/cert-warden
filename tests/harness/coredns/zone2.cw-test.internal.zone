@@ -1,0 +1,5 @@
+$ORIGIN zone2.cw-test.internal.
+$TTL 60
+@   IN SOA ns1.zone2.cw-test.internal. admin.zone2.cw-test.internal. (1 3600 600 86400 60)
+@   IN NS  ns1.zone2.cw-test.internal.
+ns1 IN A   127.0.0.1

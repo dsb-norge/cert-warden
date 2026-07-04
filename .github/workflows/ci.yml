@@ -30,6 +30,8 @@ env:
   PINACT_VERSION: "v4.1.0"
   # renovate: datasource=github-releases depName=bats-core/bats-core
   BATS_VERSION: "1.13.0"
+  # renovate: datasource=rubygems depName=bashcov
+  BASHCOV_VERSION: "3.2.0"
 
 # Default-deny; each job grants only what it needs.
 permissions: {}
@@ -296,71 +298,16 @@ jobs:
         with:
           bats-version: ${{ env.BATS_VERSION }}
           detik-install: false # kubernetes-oriented; not used here
+          # User-writable paths: the action caches its installs, and cache restores into the
+          # root-owned /usr/lib defaults fail (tar exit 2 warnings on every run).
+          support-path: ${{ runner.temp }}/bats-libs/bats-support
+          assert-path: ${{ runner.temp }}/bats-libs/bats-assert
+          file-path: ${{ runner.temp }}/bats-libs/bats-file
 
       - name: Run unit tests
         env:
-          BATS_LIB_PATH: /usr/lib # bats-action installs libs to /usr/lib/bats-*
+          BATS_LIB_PATH: ${{ runner.temp }}/bats-libs
         run: bats --print-output-on-failure tests/unit
-
-  coverage:
-    name: "coverage (kcov, advisory)"
-    # Advisory per docs/testing.md: kcov's bash parser has known blind spots (heredocs) and a
-    # reported bats-in-CI nondeterminism — the number is a trend signal; the job never fails
-    # the build. Promote to a hard gate once observed stable.
-    # ubuntu-22.04: kcov is packaged in jammy but was dropped from 24.04 (noble); move back to
-    # -latest if/when kcov returns or we switch to building it from source.
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Install bats + libraries
-        uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
-        with:
-          bats-version: ${{ env.BATS_VERSION }}
-          detik-install: false
-
-      - name: Install kcov
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq kcov
-
-      - name: Run unit suite under kcov (never fails — advisory)
-        env:
-          BATS_LIB_PATH: /usr/lib
-        run: |
-          # kcov's default bash instrumentation (PS4/xtrace) can leak trace output into what
-          # bats' `run` captures, failing assertions that pass un-instrumented — the known
-          # kcov+bats caveat this job's advisory status exists for. Prefer the DEBUG-trap
-          # method; fall back to the default; never fail the job (the un-instrumented
-          # unit-tests job is the correctness gate).
-          set +e
-          kcov --bash-method=DEBUG --include-path="${PWD}/actions,${PWD}/lib" coverage/ bats tests/unit
-          rc=$?
-          if [[ ${rc} -ne 0 && ! -e coverage/kcov-merged/coverage.json ]]; then
-            echo "retrying with kcov's default bash method"
-            kcov --include-path="${PWD}/actions,${PWD}/lib" coverage/ bats tests/unit
-            rc=$?
-          fi
-          if [[ ${rc} -ne 0 ]]; then
-            echo "::warning::bats under kcov exited ${rc} (known kcov+bats caveat);" \
-              "coverage data below may be partial."
-          fi
-          exit 0
-
-      - name: Report coverage (warn-only threshold)
-        run: |
-          # kcov writes per-binary dirs + a merged report; take the merged percent.
-          threshold=60 # raise as the integration layer lands; target >= 80
-          pct=$(jq -r '.percent_covered' coverage/kcov-merged/coverage.json 2>/dev/null ||
-            find coverage -name coverage.json -exec jq -r '.percent_covered' {} \; | sort -rn | head -1)
-          echo "### Coverage (kcov, advisory)" >>"${GITHUB_STEP_SUMMARY}"
-          echo "bash line coverage: **${pct:-unknown}%** (advisory threshold: ${threshold}%)" >>"${GITHUB_STEP_SUMMARY}"
-          echo "coverage: ${pct:-unknown}% (threshold ${threshold}%, advisory)"
-          if [[ -n "${pct}" ]] && awk "BEGIN { exit !(${pct} < ${threshold}) }"; then
-            echo "::warning::bash coverage ${pct}% is below the advisory threshold of ${threshold}%."
-          fi
 
   integration-tests:
     name: "integration tests (L2: lego vs Pebble)"
@@ -381,14 +328,40 @@ jobs:
         with:
           bats-version: ${{ env.BATS_VERSION }}
           detik-install: false
+          support-path: ${{ runner.temp }}/bats-libs/bats-support
+          assert-path: ${{ runner.temp }}/bats-libs/bats-assert
+          file-path: ${{ runner.temp }}/bats-libs/bats-file
+
+      - name: Install bashcov
+        # Coverage rides this job so the number spans L1+L2 (the integration suite drives the
+        # whole warden flow). bashcov (dedicated BASH_XTRACEFD) — NOT kcov: kcov 38's PS4
+        # engine leaks the xtrace to stderr, polluting bats' captured output and registering
+        # zero source lines (empirically 0/0 in CI and locally; docs/testing.md P-20).
+        run: sudo gem install bashcov -v "${BASHCOV_VERSION}" --no-document
 
       - name: Pull harness images
         run: docker compose -f tests/harness/docker-compose.pebble.yml pull --quiet
 
-      - name: Run integration suite
+      - name: Run unit + integration suites (instrumented)
         env:
-          BATS_LIB_PATH: /usr/lib
-        run: bats --print-output-on-failure tests/integration
+          BATS_LIB_PATH: ${{ runner.temp }}/bats-libs
+        run: |
+          bashcov --root "${PWD}" -- bats --print-output-on-failure tests/unit tests/integration |
+            tee /tmp/bats-coverage.log
+
+      - name: Report coverage (warn-only threshold)
+        run: |
+          # .simplecov filters the measurement to actions/ + lib/ (product code only).
+          threshold=60 # advisory; target >= 80 as scenarios grow
+          pct=$(grep -oE 'Line Coverage: [0-9.]+' /tmp/bats-coverage.log | grep -oE '[0-9.]+' || true)
+          {
+            echo "### Coverage (bashcov over unit + integration, advisory)"
+            echo "bash line coverage of actions/ + lib/: **${pct:-unknown}%** (advisory threshold: ${threshold}%)"
+          } >>"${GITHUB_STEP_SUMMARY}"
+          echo "coverage: ${pct:-unknown}% (threshold ${threshold}%, advisory)"
+          if [[ -n "${pct}" ]] && awk "BEGIN { exit !(${pct} < ${threshold}) }"; then
+            echo "::warning::bash coverage ${pct}% is below the advisory threshold of ${threshold}%."
+          fi
 
   action-smokes:
     name: "action smokes (L3: uses ./)"
@@ -468,7 +441,6 @@ jobs:
       - commitlint
       - private-ref-guard
       - unit-tests
-      - coverage
       - integration-tests
       - action-smokes
     runs-on: ubuntu-latest

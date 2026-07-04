@@ -313,11 +313,27 @@ jobs:
       - name: Install kcov
         run: sudo apt-get update -qq && sudo apt-get install -y -qq kcov
 
-      - name: Run unit suite under kcov
+      - name: Run unit suite under kcov (never fails — advisory)
         env:
           BATS_LIB_PATH: /usr/lib
         run: |
-          kcov --include-path="${PWD}/actions,${PWD}/lib" coverage/ bats tests/unit
+          # kcov's default bash instrumentation (PS4/xtrace) can leak trace output into what
+          # bats' `run` captures, failing assertions that pass un-instrumented — the known
+          # kcov+bats caveat this job's advisory status exists for. Prefer the DEBUG-trap
+          # method; fall back to the default; never fail the job (the un-instrumented
+          # unit-tests job is the correctness gate).
+          set +e
+          kcov --bash-method=DEBUG --include-path="${PWD}/actions,${PWD}/lib" coverage/ bats tests/unit
+          rc=$?
+          if [[ ${rc} -ne 0 && ! -e coverage/kcov-merged/coverage.json ]]; then
+            echo "retrying with kcov's default bash method"
+            kcov --include-path="${PWD}/actions,${PWD}/lib" coverage/ bats tests/unit
+            rc=$?
+          fi
+          if [[ ${rc} -ne 0 ]]; then
+            echo "::warning::bats under kcov exited ${rc} (instrumentation side effects are a known kcov+bats caveat); coverage data below may be partial."
+          fi
+          exit 0
 
       - name: Report coverage (warn-only threshold)
         run: |

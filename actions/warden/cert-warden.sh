@@ -232,9 +232,17 @@ function dns_zone_is_publicly_delegated() {
   # Get configured name servers as array
   mapfile -t _configuredNs < <(echo "${_zoneNsJson}" | jq -r '.[]')
 
-  # Get public name servers from quad1
+  # Get public name servers. A FAILED lookup (timeout/no server, dig exits non-zero) must be
+  # distinguished from an empty answer ("really not delegated"): return 2 so the caller records
+  # a failure instead of silently skipping the zone. (A SERVFAIL from the resolver still yields
+  # exit 0 + empty output and is indistinguishable from non-delegation — accepted gap.)
+  local _digOut
   # shellcheck disable=SC2086 # digArgs word-splitting is intended (resolver + options)
-  mapfile -t _publicNs < <(dig +short +timeout=5 NS "${_zoneName}" ${digArgs})
+  if ! _digOut="$(dig +short +timeout=5 NS "${_zoneName}" ${digArgs})"; then
+    echo "  ERROR: public NS lookup failed for ${_zoneName} (dig error/timeout)"
+    return 2
+  fi
+  mapfile -t _publicNs <<<"${_digOut}"
 
   # Check if all configured name servers are present in public name servers
   local _ns _pns _found
@@ -375,8 +383,11 @@ function recordCertMetric() {
     _na=$(openssl x509 -in "${_certFile}" -noout -enddate 2>/dev/null | sed 's/notAfter=//')
     _serial=$(openssl x509 -in "${_certFile}" -noout -serial 2>/dev/null | sed 's/serial=//')
     _issuer=$(openssl x509 -in "${_certFile}" -noout -issuer -nameopt RFC2253 2>/dev/null | sed 's/^issuer=//')
-    _keytype=$(openssl x509 -in "${_certFile}" -noout -text 2>/dev/null | grep -oiE "ASN1 OID: [a-zA-Z0-9-]+" | head -1 | sed 's/ASN1 OID: //')
-    _sans=$(openssl x509 -in "${_certFile}" -noout -ext subjectAltName 2>/dev/null | grep -oE "DNS:[^,]+" | sed 's/DNS://; s/ //g' | jq -R . | jq -s -c . 2>/dev/null)
+    # `|| true`: best-effort extraction — grep exits 1 on no match (RSA certs have no ASN1
+    # OID line; a cert may lack SANs) and pipefail would otherwise abort the run before the
+    # metrics/summary are written (pitfall P-7, same incident class as P-1).
+    _keytype=$(openssl x509 -in "${_certFile}" -noout -text 2>/dev/null | grep -oiE "ASN1 OID: [a-zA-Z0-9-]+" | head -1 | sed 's/ASN1 OID: //' || true)
+    _sans=$(openssl x509 -in "${_certFile}" -noout -ext subjectAltName 2>/dev/null | grep -oE "DNS:[^,]+" | sed 's/DNS://; s/ //g' | jq -R . | jq -s -c . 2>/dev/null || true)
     [ -z "${_sans}" ] && _sans="[]"
     local _naEpoch _nbEpoch _now
     _naEpoch=$(date -d "${_na}" +%s 2>/dev/null || echo "")
@@ -586,11 +597,17 @@ function resolveCertSanAdditionalDomains() {
 
   echo "  Resolving additional domains for certificate SAN field from A records in zone: ${zoneName}"
 
+  # The az call is if-tested at the call site, which disables errexit inside this function
+  # (pitfall P-4) — so its failure MUST be tested explicitly here: an empty/failed listing
+  # would otherwise fall through as "no A records" and issue a WRONG apex-only certificate.
   local _zoneJson
-  _zoneJson="$(az network dns record-set list \
+  if ! _zoneJson="$(az network dns record-set list \
     --zone-name "${zoneName}" \
     --resource-group "${rgName}" \
-    -o json)"
+    -o json)" || [ -z "${_zoneJson}" ]; then
+    echo "  ERROR: failed to list record sets for zone ${zoneName} (az error or empty response)"
+    return 1
+  fi
 
   local _zoneARecords _zoneARecordsCount
   # we exclude the apex record "@" as that is already included as primary domain
@@ -710,7 +727,13 @@ function main() {
     zoneNsJson=$(echo "${publicZonesJson}" | jq -r ".[] | select(.name == \"${zoneName}\") | .nameServers")
 
     certKvPfxSecretName="" # reset per zone; set below for delegated zones (avoids stale carry-over in metrics)
-    if ! dns_zone_is_publicly_delegated "${zoneName}" "${zoneNsJson}"; then
+    delegationRc=0
+    dns_zone_is_publicly_delegated "${zoneName}" "${zoneNsJson}" || delegationRc=$?
+    if [ "${delegationRc}" -eq 2 ]; then
+      logCertificateActionError "public NS lookup failed for ${zoneName}; cannot determine delegation"
+      recordCertMetric "failed" "-" "public NS lookup failed (dig error/timeout)"
+      continue # to next zone
+    elif [ "${delegationRc}" -ne 0 ]; then
       echo "  Zone not publicly delegated or NS mismatch, ignoring zone"
       recordCertMetric "not_delegated" "-" ""
       continue # to next zone
@@ -923,7 +946,7 @@ function main() {
 
           metricAction="issued"
           [ "${renewing}" = true ] && metricAction="renewed"
-          [ "${forceRenewal}" = true ] && metricAction="forced"
+          [ "${renewing}" = true ] && [ "${forceRenewal}" = true ] && metricAction="forced"
           recordCertMetric "${metricAction}" "${certPath}" ""
         else
           logCertificateActionError "Failed to import certificate into KeyVault"

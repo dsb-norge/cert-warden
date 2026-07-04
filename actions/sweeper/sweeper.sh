@@ -87,17 +87,23 @@ log-info "Protected prefixes (never deleted): ${PROTECTED_PREFIXES}"
 
 now_epoch="$(date -u +%s)"
 
-# Certs: name + expiry (epoch, or empty when the cert has no expiry set).
-mapfile -t cert_rows < <(
-  az keyvault certificate list --vault-name "${KV_NAME}" \
-    --query "[].{name:name, exp:attributes.expires}" -o json |
-    jq -r '.[] | "\(.name)\t\(.exp // "")"'
-)
+# Certs: name + expiry (epoch, or empty when the cert has no expiry set). The az calls are
+# captured and failure-checked explicitly: `mapfile < <(az ...)` swallows the exit status
+# (pitfall P-7 class), and a silently-empty listing would turn a scheduled destructive sweep
+# into a green no-op — or worse, desynchronize the cert/secret views.
+certListJson="$(az keyvault certificate list --vault-name "${KV_NAME}" \
+  --query "[].{name:name, exp:attributes.expires}" -o json)" || {
+  log-error "Failed to list certificates in '${KV_NAME}' — aborting sweep."
+  exit 1
+}
+mapfile -t cert_rows < <(jq -r '.[] | "\(.name)\t\(.exp // "")"' <<<"${certListJson}")
 
 # Secrets: name only.
-mapfile -t secret_names < <(
-  az keyvault secret list --vault-name "${KV_NAME}" --query "[].name" -o tsv
-)
+secretListTsv="$(az keyvault secret list --vault-name "${KV_NAME}" --query "[].name" -o tsv)" || {
+  log-error "Failed to list secrets in '${KV_NAME}' — aborting sweep."
+  exit 1
+}
+mapfile -t secret_names < <(printf '%s' "${secretListTsv}")
 
 declare -a del_certs=() del_secrets=()
 
@@ -212,6 +218,12 @@ if [[ "${total}" -eq 0 ]]; then
 fi
 
 deleted=0
+# Keep the emitted deleted-count truthful even if a delete fails mid-loop (set -e aborts):
+# the trap re-emits the running total on ANY exit (last occurrence wins in GITHUB_OUTPUT).
+emit_deleted_count() {
+  [[ -z "${GITHUB_OUTPUT:-}" ]] || echo "deleted-count=${deleted}" >>"${GITHUB_OUTPUT}"
+}
+trap emit_deleted_count EXIT
 start-group "Soft-deleting ${total} object(s)"
 for name in "${del_certs[@]+"${del_certs[@]}"}"; do
   log-info "  deleting cert  : ${name}"
@@ -226,4 +238,4 @@ done
 end-group
 
 log-info "Soft-deleted ${deleted} object(s) from '${KV_NAME}' (recoverable for the KV soft-delete window)."
-[[ -z "${GITHUB_OUTPUT:-}" ]] || echo "deleted-count=${deleted}" >>"${GITHUB_OUTPUT}"
+# (final deleted-count is emitted by the EXIT trap)

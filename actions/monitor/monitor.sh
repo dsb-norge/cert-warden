@@ -66,12 +66,16 @@ managedCount=0
 failedCount=0
 failedZones=""
 
-if [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]]; then
+# jq empty: a truncated/corrupt artifact (e.g. the warden died mid-write) must degrade to the
+# absent-metrics path — the monitor NEVER fails the workflow (its core contract).
+if [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]] && jq empty "${METRICS_FILE}" 2>/dev/null; then
   echo "::group::${_action_name}: metrics evaluation"
 
   managedCount=$(jq '[.[] | select((.kv_cert_name // "") != "" and .action != "not_delegated")] | length' "${METRICS_FILE}")
-  failedCount=$(jq '[.[] | select((.kv_cert_name // "") != "" and .action != "not_delegated") | select(.action == "failed" or ((.error // "") != ""))] | length' "${METRICS_FILE}")
-  failedZones=$(jq -r '[.[] | select((.kv_cert_name // "") != "" and .action != "not_delegated") | select(.action == "failed" or ((.error // "") != "")) | .zone] | join(", ")' "${METRICS_FILE}")
+  # failed zones deliberately do NOT require a kv_cert_name: early failures (e.g. SAN
+  # resolution, NS lookup) record before the name is assigned and must still alert.
+  failedCount=$(jq '[.[] | select(.action != "not_delegated") | select(.action == "failed" or ((.error // "") != ""))] | length' "${METRICS_FILE}")
+  failedZones=$(jq -r '[.[] | select(.action != "not_delegated") | select(.action == "failed" or ((.error // "") != "")) | .zone] | join(", ")' "${METRICS_FILE}")
 
   # The single SLO number: lowest remaining-lifetime fraction across managed certs (ignoring
   # nulls, which are failed issuances with no cert yet — counted separately above).
@@ -85,7 +89,7 @@ if [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]]; then
   echo "${_action_name}: managed=${managedCount} failed=${failedCount} min_lifetime_fraction=${minLifetimeFraction} worst_zone=${worstZone} worst_days=${worstDays}"
   echo "::endgroup::"
 else
-  echo "${_action_name}: metrics file '${METRICS_FILE:-<unset>}' missing or empty."
+  echo "${_action_name}: metrics file '${METRICS_FILE:-<unset>}' missing, empty or unparsable."
 fi
 # endregion -------------------------------------------------------------------------------------
 
@@ -108,7 +112,7 @@ if [[ "${minLifetimeFraction}" != "null" ]]; then
 fi
 
 # Layer C — job health (informational; never escalates above WARNING on its own).
-if [[ "${managedCount}" -eq 0 ]]; then
+if [[ "${managedCount}" -eq 0 && "${failedCount}" -eq 0 ]]; then
   [[ "${severity}" == "OK" ]] && severity="WARNING"
   if [[ "${CERT_WARDEN_CONCLUSION}" == "failure" ]]; then
     reasons+=("Cert Warden run failed and produced no managed-cert metrics")
@@ -238,19 +242,32 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   exit 0
 fi
 
-if [[ -z "${BOT_API_BASE}" || -z "${BOT_API_AUDIENCE}" || -z "${BOT_ALIAS}" ]]; then
-  echo "::error::${_action_name}: BOT_API_BASE / BOT_API_AUDIENCE / BOT_ALIAS must be set to deliver a notification."
+if [[ -z "${BOT_API_BASE}" && -z "${BOT_API_AUDIENCE}" && -z "${BOT_ALIAS}" ]]; then
+  # Evaluate-only mode (documented, first-class): no bot config at all — outputs carry the result.
+  echo "${_action_name}: evaluate-only mode (no bot configuration) — severity=${severity}, no delivery attempted."
+  emitOutputs
+  exit 0
+elif [[ -z "${BOT_API_BASE}" || -z "${BOT_API_AUDIENCE}" || -z "${BOT_ALIAS}" ]]; then
+  # PARTIAL bot config is a misconfiguration worth shouting about.
+  echo "::error::${_action_name}: partial bot configuration — BOT_API_BASE / BOT_API_AUDIENCE / BOT_ALIAS must all be set to deliver."
   emitOutputs
   exit 0
 fi
 
 echo "::group::${_action_name}: notify bot"
-token=$(az account get-access-token --resource "${BOT_API_AUDIENCE}" --query accessToken -o tsv)
-httpStatus=$(curl -sS -o /tmp/notify-resp.json -w '%{http_code}' \
+if ! token=$(az account get-access-token --resource "${BOT_API_AUDIENCE}" --query accessToken -o tsv); then
+  echo "::warning::${_action_name}: could not acquire a token for ${BOT_API_AUDIENCE} — notification not delivered (evaluation stands)."
+  echo "::endgroup::"
+  emitOutputs
+  exit 0
+fi
+# --max-time: a black-holed endpoint must not hang the job. On connect failure curl itself
+# prints 000 via -w; `|| true` only guards errexit (no duplicated fallback output).
+httpStatus=$(curl -sS --max-time 30 -o /tmp/notify-resp.json -w '%{http_code}' \
   -X POST "${BOT_API_BASE}/v1/notify/${BOT_ALIAS}" \
   -H "Authorization: Bearer ${token}" \
   -H "Content-Type: application/json" \
-  -d "${payload}" || echo "000")
+  -d "${payload}" || true)
 echo "${_action_name}: bot responded HTTP ${httpStatus}"
 cat /tmp/notify-resp.json 2>/dev/null || true
 echo "::endgroup::"

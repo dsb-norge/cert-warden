@@ -141,3 +141,23 @@ TSV
   assert_output --partial "log-only (dry run)"
   assert_output --partial "Certificates to delete: **2**"
 }
+
+@test "az certificate-list failure aborts the sweep instead of green no-op (review F5)" {
+  # Shim override: certificate list fails like a throttled/unauthorized az call.
+  cat >"${BATS_TEST_TMPDIR}/bin/az" <<'AZSTUB'
+#!/usr/bin/env bash
+echo "az $*" >>"${AZ_STUB_CALLS}"
+if [[ "$1 $2 $3" == "keyvault certificate list" ]]; then
+  echo "ERROR: (429) Too Many Requests" >&2
+  exit 1
+fi
+exit 0
+AZSTUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export LOG_ONLY="false"
+  run bash "${SWEEPER_SH}"
+  assert_failure
+  assert_output --partial "Failed to list certificates"
+  run grep -c "delete" "${AZ_STUB_CALLS}"
+  assert_output "0"
+}

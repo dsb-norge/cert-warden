@@ -45,11 +45,11 @@ immediately; fork PRs get tests but no preview (the job needs `contents: write`)
 
 ## Releases
 
-- `release-please.yml` runs on pushes to `main` but **no-ops until the release GitHub App is
-  configured** (`RELEASE_APP_ID` repo variable + `RELEASE_APP_PRIVATE_KEY` secret). The App —
-  not `GITHUB_TOKEN` — is required because the release PR edits files under
-  `.github/workflows/` (needs the App's `workflows: write`) and because App-created PRs
-  trigger CI.
+- `release-please.yml` authenticates as the org's **`dsb-norge-cert-warden-releaser`**
+  GitHub App (`RELEASE_APP_ID` repo variable + `RELEASE_APP_PRIVATE_KEY` secret; the job
+  no-ops if unset). The App — not `GITHUB_TOKEN` — is required because the release PR edits
+  files under `.github/workflows/` (needs the App's `workflows: write`) and because
+  App-created PRs trigger CI.
 - Internal refs carry `# x-release-please-version` annotations: **exactly one semver string
   per annotated line**. release-please rewrites them in the release PR (config:
   `release-please-config.json`, `extra-files` with `"type": "generic"` — mandatory for YAML

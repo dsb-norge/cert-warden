@@ -162,7 +162,7 @@ certificateActionErrorCount=0
 #   None
 function logCertificateActionError() {
   local _message="${1}"
-  echo "ERROR: ${_message}"
+  log-error "${_message}"
   # Assignment form, NOT ((certificateActionErrorCount++)): under `set -e` an arithmetic
   # command whose result is 0 returns exit status 1, so the post-increment aborts the whole
   # script on the FIRST error (when the counter is still 0) -- before the end-of-run metrics
@@ -227,7 +227,7 @@ function dns_zone_is_publicly_delegated() {
   local _zoneName="$1"
   local _zoneNsJson="$2"
 
-  echo "  Checking if zone ${_zoneName} is publicly delegated"
+  log-info "  Checking if zone ${_zoneName} is publicly delegated"
 
   # Get configured name servers as array
   mapfile -t _configuredNs < <(echo "${_zoneNsJson}" | jq -r '.[]')
@@ -239,7 +239,7 @@ function dns_zone_is_publicly_delegated() {
   local _digOut
   # shellcheck disable=SC2086 # digArgs word-splitting is intended (resolver + options)
   if ! _digOut="$(dig +short +timeout=5 NS "${_zoneName}" ${digArgs})"; then
-    echo "  ERROR: public NS lookup failed for ${_zoneName} (dig error/timeout)"
+    log-info "  ERROR: public NS lookup failed for ${_zoneName} (dig error/timeout)"
     return 2
   fi
   mapfile -t _publicNs <<<"${_digOut}"
@@ -332,15 +332,15 @@ function installZoneCertFromKeyVault() {
 function storeLegoMetadataInKeyVault() {
   local _metaPath="$1" _metaSecretName="$2"
   if [ ! -f "${_metaPath}" ]; then
-    echo "  WARNING: lego metadata file not found, cannot persist for ARI: ${_metaPath}"
+    log-info "  WARNING: lego metadata file not found, cannot persist for ARI: ${_metaPath}"
     return 1
   fi
   local _id
   if _id=$(az keyvault secret set --name "${_metaSecretName}" --vault-name "${certKvName}" --value "$(jq -c . "${_metaPath}")" --query id -o tsv); then
-    echo "    Stored lego metadata (for ARI) in KeyVault secret: ${_id}"
+    log-info "    Stored lego metadata (for ARI) in KeyVault secret: ${_id}"
     return 0
   fi
-  echo "  WARNING: failed to store lego metadata in KeyVault secret: ${_metaSecretName}"
+  log-info "  WARNING: failed to store lego metadata in KeyVault secret: ${_metaSecretName}"
   return 1
 }
 
@@ -357,10 +357,10 @@ function restoreLegoMetadataFromKeyVault() {
   local _metaSecretName="$1" _metaPath="$2" _val
   if _val=$(az keyvault secret show --name "${_metaSecretName}" --vault-name "${certKvName}" --query value -o tsv 2>/dev/null) && [ -n "${_val}" ]; then
     echo "${_val}" >"${_metaPath}"
-    echo "  Restored lego metadata (for ARI) from KeyVault secret: ${_metaSecretName}"
+    log-info "  Restored lego metadata (for ARI) from KeyVault secret: ${_metaSecretName}"
     return 0
   fi
-  echo "  No lego metadata in KeyVault yet for ${_metaSecretName}; lego will treat this as a new issuance"
+  log-info "  No lego metadata in KeyVault yet for ${_metaSecretName}; lego will treat this as a new issuance"
   return 1
 }
 
@@ -487,8 +487,8 @@ function requestNewCertificate() {
     $(getCommonLegoRunOptions) \
     $(getCommonLegoCommandOptions)"
 
-  echo "  Requesting new certificate using lego command:"
-  echo "    ${_legoCommandLine}"
+  log-info "  Requesting new certificate using lego command:"
+  log-info "    ${_legoCommandLine}"
 
   # lego defaults:
   #   AZURE_PROPAGATION_TIMEOUT=120
@@ -560,8 +560,8 @@ function renewExistingCertificate() {
     $(getCommonLegoCommandOptions) \
     ${_renewControl}"
 
-  echo "  Renew lego command:"
-  echo "    ${_legoCommandLine}"
+  log-info "  Renew lego command:"
+  log-info "    ${_legoCommandLine}"
 
   # lego defaults:
   #   AZURE_PROPAGATION_TIMEOUT=120
@@ -595,7 +595,7 @@ function renewExistingCertificate() {
 #     certSanAdditionalDomainsJsonArray (json array, output)
 function resolveCertSanAdditionalDomains() {
 
-  echo "  Resolving additional domains for certificate SAN field from A records in zone: ${zoneName}"
+  log-info "  Resolving additional domains for certificate SAN field from A records in zone: ${zoneName}"
 
   # The az call is if-tested at the call site, which disables errexit inside this function
   # (pitfall P-4) — so its failure MUST be tested explicitly here: an empty/failed listing
@@ -605,7 +605,7 @@ function resolveCertSanAdditionalDomains() {
     --zone-name "${zoneName}" \
     --resource-group "${rgName}" \
     -o json)" || [ -z "${_zoneJson}" ]; then
-    echo "  ERROR: failed to list record sets for zone ${zoneName} (az error or empty response)"
+    log-info "  ERROR: failed to list record sets for zone ${zoneName} (az error or empty response)"
     return 1
   fi
 
@@ -619,15 +619,15 @@ function resolveCertSanAdditionalDomains() {
   certSanAdditionalDomainsJsonArray="[]"
 
   if [ "${_zoneARecordsCount}" -eq 0 ]; then
-    echo "  No A records found in zone, certificate SAN will include wildcard domain *.${zoneName}"
+    log-info "  No A records found in zone, certificate SAN will include wildcard domain *.${zoneName}"
     certSanAdditionalDomains+=("*.${zoneName}")
     certSanAdditionalDomainsJsonArray=$(echo "${certSanAdditionalDomainsJsonArray}" | jq -n --arg domain "*.${zoneName}" '[$domain]')
   else
-    echo "  Number of A records found: ${_zoneARecordsCount}"
-    echo "  Certificate will include the following in the SAN field:"
+    log-info "  Number of A records found: ${_zoneARecordsCount}"
+    log-info "  Certificate will include the following in the SAN field:"
     local _aRecordName
     for _aRecordName in $(echo "${_zoneARecords}" | jq -r '.[].name'); do
-      echo "   - ${_aRecordName}.${zoneName}"
+      log-info "   - ${_aRecordName}.${zoneName}"
       certSanAdditionalDomains+=("${_aRecordName}.${zoneName}")
       certSanAdditionalDomainsJsonArray=$(echo "${certSanAdditionalDomainsJsonArray}" | jq --arg domain "${_aRecordName}.${zoneName}" '. + [$domain]')
     done
@@ -648,20 +648,20 @@ end-group # Load
 function main() {
 
   start-group "Init"
-  echo "  check if lego ACME client is installed"
+  log-info "  check if lego ACME client is installed"
   lego --version
 
-  echo "  Set Azure Subscription to ${subId}"
+  log-info "  Set Azure Subscription to ${subId}"
   az account set --subscription "${subId}"
 
   # local dir structure for lego
   #   ref. https://github.com/go-acme/lego/blob/master/cmd/accounts_storage.go
-  echo "  Creating local directory structure for lego client"
+  log-info "  Creating local directory structure for lego client"
   legoDirPath="$(mktemp -d)"
   legoCertificatesPath="${legoDirPath}/certificates"
   legoAccountsPath="${legoDirPath}/accounts"
-  echo "    Certificates path: ${legoCertificatesPath}"
-  echo "    Accounts path: ${legoAccountsPath}"
+  log-info "    Certificates path: ${legoCertificatesPath}"
+  log-info "    Accounts path: ${legoAccountsPath}"
 
   # Per-cert metrics accumulator (one JSON record per zone, appended via recordCertMetric).
   # Assembled into a JSON array + GitHub step summary at the end of the run.
@@ -669,14 +669,14 @@ function main() {
   : >"${metricsFile}"
 
   if ! letsencryptAccountExistsInKeyVault; then
-    echo "  Let's Encrypt account details not found in KeyVault: ${certKvName}"
-    echo "  A new account will be created using email for new registration: ${emailToUseForNewAccountRegistrationWithLetsencrypt}"
+    log-info "  Let's Encrypt account details not found in KeyVault: ${certKvName}"
+    log-info "  A new account will be created using email for new registration: ${emailToUseForNewAccountRegistrationWithLetsencrypt}"
     accountEmail="${emailToUseForNewAccountRegistrationWithLetsencrypt}"
     accountKey=
     accountJson=
     creatingLetsEncryptAccount=true
   else
-    echo "  Reading Let's Encrypt account details from KeyVault: ${certKvName}"
+    log-info "  Reading Let's Encrypt account details from KeyVault: ${certKvName}"
     accountEmail=$(az keyvault secret show --name "${letsencryptAccountEmailSecretName}" --vault-name "${certKvName}" --query value -o tsv)
     accountKey=$(az keyvault secret show --name "${letsencryptAccountKeySecretName}" --vault-name "${certKvName}" --query value -o tsv)
     accountJson=$(az keyvault secret show --name "${letsencryptAccountJsonSecretName}" --vault-name "${certKvName}" --query value -o tsv)
@@ -691,14 +691,14 @@ function main() {
 
   # if we have credentials from KeyVault, store them in local file
   if [ -n "${accountKey}" ] && [ -n "${accountJson}" ]; then
-    echo "  Storing account JSON in local file: ${accountJsonPath}"
+    log-info "  Storing account JSON in local file: ${accountJsonPath}"
 
     # use jq to pretty print and valdate the JSON
     accountJsonPretty=$(echo "${accountJson}" | jq '.')
     echo "${accountJsonPretty}" >"${accountJsonPath}"
     chmod 644 "${accountJsonPath}"
 
-    echo "  Storing account key in local file: ${accountKeyPath}"
+    log-info "  Storing account key in local file: ${accountKeyPath}"
     echo "${accountKey}" >"${accountKeyPath}"
     chmod 644 "${accountKeyPath}"
   fi
@@ -712,16 +712,16 @@ function main() {
   end-group # Init
 
   start-group "Enumerate"
-  echo "Reading public DNS zones in resource group: ${rgName}"
+  log-info "Reading public DNS zones in resource group: ${rgName}"
   publicZonesJson="$(az network dns zone list --resource-group "${rgName}" --output json)"
   publicZonesCount=$(echo "${publicZonesJson}" | jq 'length')
-  echo "Number of public DNS zones found: ${publicZonesCount}"
+  log-info "Number of public DNS zones found: ${publicZonesCount}"
 
   end-group # Enumerate
 
   for zoneName in $(echo "${publicZonesJson}" | jq -r '.[].name'); do
     start-group "Zone: ${zoneName}"
-    echo "Determining certificate operations for DNS zone: ${zoneName}"
+    log-info "Determining certificate operations for DNS zone: ${zoneName}"
 
     # Extract configured name servers for this zone
     zoneNsJson=$(echo "${publicZonesJson}" | jq -r ".[] | select(.name == \"${zoneName}\") | .nameServers")
@@ -734,18 +734,18 @@ function main() {
       recordCertMetric "failed" "-" "public NS lookup failed (dig error/timeout)"
       continue # to next zone
     elif [ "${delegationRc}" -ne 0 ]; then
-      echo "  Zone not publicly delegated or NS mismatch, ignoring zone"
+      log-info "  Zone not publicly delegated or NS mismatch, ignoring zone"
       recordCertMetric "not_delegated" "-" ""
       continue # to next zone
     else
-      echo "  Zone is publicly delegated, proceeding"
+      log-info "  Zone is publicly delegated, proceeding"
 
       # random pfx password, used when storing locally, in key vault there is no password
-      echo "  Generating random temporary password for PFX certificate"
+      log-info "  Generating random temporary password for PFX certificate"
       pfxCertPassword="$(openssl rand -base64 48)"
 
       # a place to store certs
-      echo "  Creating local directory for lego certificates: ${legoCertificatesPath}"
+      log-info "  Creating local directory for lego certificates: ${legoCertificatesPath}"
       rm -rf "${legoCertificatesPath}" || :
       mkdir -p "${legoCertificatesPath}"
 
@@ -777,10 +777,10 @@ function main() {
 
       # check if cert already exists in KeyVault
       if secretExistsInKeyVault "${certKvName}" "${certKvPfxSecretName}"; then
-        echo "  Certificate for this zone already exists in KeyVault: ${certKvName}, secret name: ${certKvPfxSecretName}"
+        log-info "  Certificate for this zone already exists in KeyVault: ${certKvName}, secret name: ${certKvPfxSecretName}"
 
         if [ "${forceNew}" = true ]; then
-          echo "  Ignoring existing certificate as 'forceNew' is set to '${forceNew}'"
+          log-info "  Ignoring existing certificate as 'forceNew' is set to '${forceNew}'"
           renewing=false
         else
           # key vault has the SAN values as well as the domain/subject for the existing certificate
@@ -799,33 +799,33 @@ function main() {
           # present in the SAN for a correctly-issued cert.
           if ! echo "${existingCertSanValuesJsonArrayArray}" | jq -e --arg z "${zoneName}" 'index($z) != null' &>/dev/null; then
             # the apex zone is not in the existing cert's SAN -> request a new certificate
-            echo "WARNING: Existing certificate does not cover the DNS zone apex in its SAN"
-            echo "WARNING:   SAN is '$(echo "${existingCertSanValuesJsonArrayArray}" | jq -c .)' vs. DNS zone name '${zoneName}'"
-            echo "WARNING:   a new certificate will be requested"
+            log-warn "Existing certificate does not cover the DNS zone apex in its SAN"
+            log-warn "  SAN is '$(echo "${existingCertSanValuesJsonArrayArray}" | jq -c .)' vs. DNS zone name '${zoneName}'"
+            log-warn "  a new certificate will be requested"
             renewing=false
           elif ! diff <(echo "${existingCertSanValuesWithoutZone}" | jq -r 'sort|.[]') <(echo "${certSanAdditionalDomainsJsonArray}" | jq -r 'sort|.[]') &>/dev/null; then
             # diff in SAN values means we _must_ request a new certificate
-            echo "  Existing certificate subject alternate names (SAN) list does not match A records of DNS zone"
-            echo "    Existing certificates' SAN:"
+            log-info "  Existing certificate subject alternate names (SAN) list does not match A records of DNS zone"
+            log-info "    Existing certificates' SAN:"
             for san in $(echo "${existingCertSanValuesWithoutZone}" | jq -r 'sort|.[]'); do
-              echo "     - ${san}"
+              log-info "     - ${san}"
             done
-            echo "    A records of DNS zone are:"
+            log-info "    A records of DNS zone are:"
             for san in $(echo "${certSanAdditionalDomainsJsonArray}" | jq -r 'sort|.[]'); do
-              echo "     - ${san}"
+              log-info "     - ${san}"
             done
-            echo "  A new certificate will be requested"
+            log-info "  A new certificate will be requested"
             renewing=false
           else
             # no diff found, we can renew the existing cert
-            echo "  Existing certificate matches DNS zone name and A records, proceeding to evaluate renewal of existing certificate"
+            log-info "  Existing certificate matches DNS zone name and A records, proceeding to evaluate renewal of existing certificate"
             renewing=true
           fi
         fi # if not force new cert
 
       else
-        echo "  Certificate for this zone does not exist in KeyVault: ${certKvName}, secret name: ${certKvPfxSecretName}"
-        echo "  A new certificate will be requested from Let's Encrypt"
+        log-info "  Certificate for this zone does not exist in KeyVault: ${certKvName}, secret name: ${certKvPfxSecretName}"
+        log-info "  A new certificate will be requested from Let's Encrypt"
 
         # issuing new certificate
         renewing=false
@@ -833,7 +833,7 @@ function main() {
 
       if [ "${renewing}" = false ] || [ "${forceNew}" = true ]; then
 
-        echo "  Requesting new certificate from Let's Encrypt for ${zoneName}"
+        log-info "  Requesting new certificate from Let's Encrypt for ${zoneName}"
         if ! requestNewCertificate; then
           logCertificateActionError "failed to obtain certificate from Let's Encrypt"
           # Record the precise failure and move on, symmetric with the renewal path below. Without
@@ -847,7 +847,7 @@ function main() {
       elif [ "${renewing}" = true ]; then
 
         # download existing cert from KeyVault to local filesystem
-        echo "  Saving existing certificate to local filesystem"
+        log-info "  Saving existing certificate to local filesystem"
         if ! installZoneCertFromKeyVault "${certKvName}" "${certKvPfxSecretName}" "${certPath}" "${certKeyPath}" "${certIssuerPath}" "${pfxCertPassword}"; then
           logCertificateActionError "Failed to install existing certificate from KeyVault to local filesystem"
           recordCertMetric "failed" "-" "failed to install existing certificate from KeyVault"
@@ -859,9 +859,9 @@ function main() {
         restoreLegoMetadataFromKeyVault "${certKvMetaSecretName}" "${legoCertMetaPath}" || true
 
         if [ "${forceRenewal}" = true ]; then
-          echo "  Existing certificate for ${zoneName} will be renewed now (forceRenewal=true)"
+          log-info "  Existing certificate for ${zoneName} will be renewed now (forceRenewal=true)"
         else
-          echo "  Evaluating renewal of existing certificate for ${zoneName} via ARI (fallback: lego --renew-days default)"
+          log-info "  Evaluating renewal of existing certificate for ${zoneName} via ARI (fallback: lego --renew-days default)"
         fi
 
         if ! renewExistingCertificate; then
@@ -889,20 +889,20 @@ function main() {
         continue
       elif [ "${creatingLetsEncryptAccount}" = true ]; then
         # if creating new account, capture the credentials from disk and store in KeyVault as soon as possible
-        echo "  Capturing newly created Let's Encrypt account details from disk and storing in KeyVault: ${certKvName}"
+        log-info "  Capturing newly created Let's Encrypt account details from disk and storing in KeyVault: ${certKvName}"
 
         # compress and validate json with jq
         accountJsonMinified=$(jq -c . "${accountJsonPath}")
 
         # save to KeyVault
         accountJsonSecretId=$(az keyvault secret set --name "${letsencryptAccountJsonSecretName}" --vault-name "${certKvName}" --value "${accountJsonMinified}" --query id -o tsv)
-        echo "    Stored account JSON in KeyVault secret: ${accountJsonSecretId}"
+        log-info "    Stored account JSON in KeyVault secret: ${accountJsonSecretId}"
 
         accountEmailSecretId=$(az keyvault secret set --name "${letsencryptAccountEmailSecretName}" --vault-name "${certKvName}" --value "${accountEmail}" --query id -o tsv)
-        echo "    Stored account email in KeyVault secret: ${accountEmailSecretId}"
+        log-info "    Stored account email in KeyVault secret: ${accountEmailSecretId}"
 
         accountKeySecretId=$(az keyvault secret set --name "${letsencryptAccountKeySecretName}" --vault-name "${certKvName}" --value "$(cat "${accountKeyPath}")" --query id -o tsv)
-        echo "    Stored account key in KeyVault secret: ${accountKeySecretId}"
+        log-info "    Stored account key in KeyVault secret: ${accountKeySecretId}"
 
         # only do this for the first successful cert request
         creatingLetsEncryptAccount=false
@@ -918,12 +918,12 @@ function main() {
         recordCertMetric "failed" "-" "expected certificate file not found after issuance"
         continue
       elif [ ! -f "${pfxCertPath}" ] && [ "${renewing}" = true ]; then
-        echo "  No new certificate file found after renewal evaluation operation, assuming certificate renewal was not needed"
+        log-info "  No new certificate file found after renewal evaluation operation, assuming certificate renewal was not needed"
         recordCertMetric "skipped" "${certPath}" ""
         continue
       else
-        echo "  Certificate file found: ${pfxCertPath}"
-        echo "  Importing certificate into KeyVault: ${certKvName}, secret name: ${certKvPfxSecretName}"
+        log-info "  Certificate file found: ${pfxCertPath}"
+        log-info "  Importing certificate into KeyVault: ${certKvName}, secret name: ${certKvPfxSecretName}"
         if importResultJson=$(
           az keyvault certificate import \
             --vault-name "${certKvName}" \
@@ -932,11 +932,11 @@ function main() {
             --password "${pfxCertPassword}" \
             --tags "${kvCertSecretTags[@]}"
         ); then
-          echo "  Successfully imported certificate into KeyVault"
+          log-info "  Successfully imported certificate into KeyVault"
 
           # output versionless id of the imported secret
           certVersionlessKvId="$(echo "${importResultJson}" | jq -r .sid | sed 's|/[0-9a-fA-F]\{32\}$||')"
-          echo "    Versionless secret id: ${certVersionlessKvId}"
+          log-info "    Versionless secret id: ${certVersionlessKvId}"
 
           # Persist lego's metadata for this freshly issued/renewed cert so the NEXT run can
           # restore it and let ARI decide on renewal. The certUrl changes each issuance, so this
@@ -955,7 +955,7 @@ function main() {
       fi
 
       # clean up
-      echo "  Cleaning up local lego certificate directory: ${legoCertificatesPath}"
+      log-info "  Cleaning up local lego certificate directory: ${legoCertificatesPath}"
       rm -rf "${legoCertificatesPath}"
       unset pfxCertPassword
     fi # end if zone is publicly delegated
@@ -974,7 +974,7 @@ function main() {
   # only -- orphaned/let-expire objects are never recorded, so they never generate alert noise.
   certMetricsOutputFile="${CERT_METRICS_OUTPUT_FILE:-${GITHUB_WORKSPACE:-.}/cert-warden-metrics-${letsencryptEnvironment}.json}"
   jq -s '.' "${metricsFile}" >"${certMetricsOutputFile}"
-  echo "  Wrote per-cert metrics: ${certMetricsOutputFile}"
+  log-info "  Wrote per-cert metrics: ${certMetricsOutputFile}"
 
   # Run-level rollup. min_lifetime_fraction is the single number the symptom-based alert keys on:
   # it only drops on SUSTAINED renewal failure, is lifetime-relative (works for 90-day or 6-day
@@ -983,20 +983,20 @@ function main() {
   metricsManaged=$(jq '[.[] | select(.action != "not_delegated")] | length' "${certMetricsOutputFile}")
   metricsFailed=$(jq '[.[] | select(.action == "failed")] | length' "${certMetricsOutputFile}")
   metricsMinFraction=$(jq '[.[] | .lifetime_fraction_remaining // empty] | if length > 0 then min else null end' "${certMetricsOutputFile}")
-  echo "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} min_lifetime_fraction=${metricsMinFraction}"
+  log-info "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} min_lifetime_fraction=${metricsMinFraction}"
 
   # GitHub step summary: a human-readable per-run table (no-op outside GitHub Actions).
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "## Cert Warden — \`${letsencryptEnvironment}\` run summary"
       echo ""
-      echo "zones: **${metricsTotal}** · managed: **${metricsManaged}** · failed: **${metricsFailed}** · min lifetime remaining: **${metricsMinFraction}**"
+      log-info "zones: **${metricsTotal}** · managed: **${metricsManaged}** · failed: **${metricsFailed}** · min lifetime remaining: **${metricsMinFraction}**"
       echo ""
       echo "| zone | action | days to expiry | lifetime % left | key type | error |"
       echo "| --- | --- | ---: | ---: | --- | --- |"
       jq -r '.[] | "| \(.zone) | \(.action) | \(.days_to_expiry // "") | \(if .lifetime_fraction_remaining == null then "" else (.lifetime_fraction_remaining * 100 | floor) end) | \(.key_type // "") | \(.error) |"' "${certMetricsOutputFile}"
     } >>"${GITHUB_STEP_SUMMARY}"
-    echo "  Wrote GitHub step summary"
+    log-info "  Wrote GitHub step summary"
   fi
 
   end-group # Metrics
@@ -1004,7 +1004,7 @@ function main() {
 
   # clean up
   start-group "Cleanup"
-  echo "  Cleaning up local lego directory: ${legoDirPath}"
+  log-info "  Cleaning up local lego directory: ${legoDirPath}"
   rm -rf "${legoDirPath}"
   rm -f "${metricsFile}"
   end-group # Cleanup
@@ -1012,11 +1012,11 @@ function main() {
   # Exit with error count if any errors occurred
   if [ "${certificateActionErrorCount}" -gt 0 ]; then
     echo ""
-    echo "Script completed with ${certificateActionErrorCount} error(s). Exiting with non-zero status code."
+    log-info "Script completed with ${certificateActionErrorCount} error(s). Exiting with non-zero status code."
     exit 1
   else
     echo ""
-    echo "Script completed successfully with no errors."
+    log-info "Script completed successfully with no errors."
     exit 0
   fi
 

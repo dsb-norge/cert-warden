@@ -84,7 +84,7 @@ jobs:
           SEVERITY: ${{ steps.monitor.outputs.severity }}
           MINLF: ${{ steps.monitor.outputs.min-lifetime-fraction }}
         run: |
-          [[ "${SEVERITY}" == "CRITICAL" && "${MINLF}" == "0.1" || "${MINLF}" == "0.10" ]] || {
+          [[ "${SEVERITY}" == "CRITICAL" && ( "${MINLF}" == "0.1" || "${MINLF}" == "0.10" ) ]] || {
             echo "::error::unexpected monitor outputs: severity=${SEVERITY} min=${MINLF}"
             exit 1
           }

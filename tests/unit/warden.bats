@@ -142,3 +142,31 @@ setup() {
   ' "${metricsFile}"
   assert_success
 }
+
+@test "resolveCertSanAdditionalDomains fails loudly when az fails (review F1)" {
+  source "${WARDEN_SH}"
+  loadConfig
+  # PATH-shim az that fails like a throttled call — the function must return non-zero, NOT
+  # fall through to an empty SAN set (which would issue a wrong apex-only certificate).
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"${BATS_TEST_TMPDIR}/bin/az"
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+  zoneName="f1.example.test"
+  # Call exactly like the call site does (if-tested => errexit disabled inside, pitfall P-4):
+  if ! resolveCertSanAdditionalDomains; then
+    rc=1
+  else
+    rc=0
+  fi
+  [ "${rc}" -eq 1 ]
+}
+
+@test "dns_zone_is_publicly_delegated returns 2 on lookup failure (review F6)" {
+  source "${WARDEN_SH}"
+  export CW_DIG_ARGS="@127.0.0.1 -p 1" # nothing listens: dig errors out fast
+  loadConfig
+  rc=0
+  dns_zone_is_publicly_delegated "f6.example.test" '["ns1.f6.example.test."]' || rc=$?
+  [ "${rc}" -eq 2 ]
+}

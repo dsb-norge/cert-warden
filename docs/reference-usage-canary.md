@@ -46,9 +46,25 @@ jobs:
       force-all-new: true # full issuance every cycle, not just when due
       tag-application-name: "cert-warden canary"
 
-  alert-on-failure:
-    needs: canary
-    if: failure()
+```
+
+And a **separate** monitor workflow chained on completion. (Why separate: the reusable
+monitor resolves runs via the `workflow_run` event or "latest completed" — a `needs:` job in
+the same run would evaluate the *previous* canary's artifact, since the current run isn't
+completed yet.)
+
+```yaml
+name: Cert Warden Canary Monitor
+
+on:
+  workflow_run:
+    workflows: ["Cert Warden Canary"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  alert:
     permissions:
       id-token: write
       actions: read

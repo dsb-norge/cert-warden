@@ -114,3 +114,31 @@ healthy_record() {
   assert_output --partial "Cert Warden monitor — unittest — OK"
   assert_output --partial "min_lifetime_fraction"
 }
+
+@test "corrupt/truncated metrics JSON degrades to the absent-metrics path, exit 0 (review F2)" {
+  printf '[{"zone":"trunc' >"${METRICS}" # a warden killed mid-write
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "missing, empty or unparsable"
+  assert_output --partial "severity=WARNING"
+}
+
+@test "failed zone WITHOUT kv_cert_name still alerts (review F4)" {
+  write_metrics_fixture "${METRICS}" \
+    "$(healthy_record)" \
+    '{"zone":"early-fail.example.test","action":"failed","kv_cert_name":"","lifetime_fraction_remaining":null,"days_to_expiry":null,"error":"failed to resolve SAN additional domains"}'
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=WARNING"
+  assert_output --partial "early-fail.example.test"
+}
+
+@test "evaluate-only mode (no bot config) emits no error annotation (review F9)" {
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"c.example.test","action":"none","kv_cert_name":"le-cert-production-c-pfx","lifetime_fraction_remaining":0.30,"days_to_expiry":27,"error":""}'
+  export DRY_RUN="false" # bot config entirely absent -> evaluate-only, not a delivery attempt
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "evaluate-only mode"
+  refute_output --partial "::error::"
+}

@@ -199,7 +199,8 @@ jobs:
       azure-subscription-id: ${{ matrix.vars.azure-subscription-id }}
       azure-client-id: ${{ matrix.vars.azure-client-id }}
       key-vault-name: ${{ matrix.vars.key-vault-name }}
-      log-only: ${{ github.event_name != 'schedule' && (inputs.log_only || true) }}
+      # Dispatch: the operator's choice. Schedule: always destructive (that's graduation step 3).
+      log-only: ${{ github.event_name != 'schedule' && inputs.log_only }}
 ```
 
 **Sweeper graduation ladder** (default-safe by design): ① dispatch dry-runs and review the

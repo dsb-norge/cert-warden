@@ -173,15 +173,15 @@ log-info "Candidates: ${#del_certs[@]} certificate(s) + ${#del_secrets[@]} secre
 
 # Generous outputs (D-14): callers can gate/report on the evaluation regardless of mode.
 # deleted-count is re-emitted after a destructive pass (last occurrence wins).
+# NOTE: machine-read emission — always via set-output, never the log-* helpers (their
+# "<tool>: " prefix corrupts GITHUB_OUTPUT keys; bit us once already).
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-  {
-    log-info "candidates-count=${total}"
-    echo "candidates-json=$(jq -nc \
-      --argjson certs "$(printf '%s\n' "${del_certs[@]+"${del_certs[@]}"}" | jq -R . | jq -sc 'map(select(. != ""))')" \
-      --argjson secrets "$(printf '%s\n' "${del_secrets[@]+"${del_secrets[@]}"}" | jq -R . | jq -sc 'map(select(. != ""))')" \
-      '{certificates: $certs, secrets: $secrets}')"
-    log-info "deleted-count=0"
-  } >>"${GITHUB_OUTPUT}"
+  set-output "candidates-count" "${total}"
+  set-output "candidates-json" "$(jq -nc \
+    --argjson certs "$(printf '%s\n' "${del_certs[@]+"${del_certs[@]}"}" | jq -R . | jq -sc 'map(select(. != ""))')" \
+    --argjson secrets "$(printf '%s\n' "${del_secrets[@]+"${del_secrets[@]}"}" | jq -R . | jq -sc 'map(select(. != ""))')" \
+    '{certificates: $certs, secrets: $secrets}')"
+  set-output "deleted-count" "0"
 fi
 
 # --- safety cap -----------------------------------------------------------------------------
@@ -221,7 +221,7 @@ deleted=0
 # Keep the emitted deleted-count truthful even if a delete fails mid-loop (set -e aborts):
 # the trap re-emits the running total on ANY exit (last occurrence wins in GITHUB_OUTPUT).
 emit_deleted_count() {
-  [[ -z "${GITHUB_OUTPUT:-}" ]] || echo "deleted-count=${deleted}" >>"${GITHUB_OUTPUT}"
+  [[ -z "${GITHUB_OUTPUT:-}" ]] || set-output "deleted-count" "${deleted}"
 }
 trap emit_deleted_count EXIT
 start-group "Soft-deleting ${total} object(s)"

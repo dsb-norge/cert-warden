@@ -142,3 +142,20 @@ healthy_record() {
   assert_output --partial "evaluate-only mode"
   refute_output --partial "::error::"
 }
+
+@test "GITHUB_OUTPUT emission is machine-clean key=value (regression: log prefix corrupted keys)" {
+  write_metrics_fixture "${METRICS}" \
+    "$(healthy_record)" \
+    '{"zone":"d.example.test","action":"failed","kv_cert_name":"le-cert-production-d-pfx","lifetime_fraction_remaining":null,"days_to_expiry":null,"error":"boom"}'
+  export GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/gh_output"
+  : >"${GITHUB_OUTPUT}"
+  run bash "${MONITOR_SH}"
+  assert_success
+  # Every line must be bare key=value (no log prefixes, no stray text):
+  run grep -vcE '^[a-z-]+=' "${GITHUB_OUTPUT}"
+  assert_output "0"
+  run grep -c '^severity=WARNING$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+  run grep -c '^failed-count=1$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+}

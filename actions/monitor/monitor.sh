@@ -169,17 +169,17 @@ echo "${_action_name}: severity=${severity}"
 notified="false"
 notifyHttpStatus=""
 emitOutputs() {
+  # NOTE: machine-read emission — always via set-output (plain writes), NEVER the log-*
+  # helpers: their "<tool>: " prefix corrupts GITHUB_OUTPUT keys (bit us once already).
   [[ -n "${GITHUB_OUTPUT:-}" ]] || return 0
-  {
-    log-info "severity=${severity}"
-    log-info "min-lifetime-fraction=${minLifetimeFraction}"
-    log-info "managed-count=${managedCount}"
-    log-info "failed-count=${failedCount}"
-    log-info "worst-zone=${worstZone}"
-    log-info "reasons-json=$(printf '%s\n' "${reasons[@]:-}" | jq -R . | jq -sc 'map(select(. != ""))')"
-    log-info "notified=${notified}"
-    log-info "notify-http-status=${notifyHttpStatus}"
-  } >>"${GITHUB_OUTPUT}"
+  set-output "severity" "${severity}"
+  set-output "min-lifetime-fraction" "${minLifetimeFraction}"
+  set-output "managed-count" "${managedCount}"
+  set-output "failed-count" "${failedCount}"
+  set-output "worst-zone" "${worstZone}"
+  set-output "reasons-json" "$(printf '%s\n' "${reasons[@]:-}" | jq -R . | jq -sc 'map(select(. != ""))')"
+  set-output "notified" "${notified}"
+  set-output "notify-http-status" "${notifyHttpStatus}"
 }
 # endregion -------------------------------------------------------------------------------------
 

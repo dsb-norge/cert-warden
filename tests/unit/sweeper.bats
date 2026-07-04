@@ -161,3 +161,17 @@ AZSTUB
   run grep -c "delete" "${AZ_STUB_CALLS}"
   assert_output "0"
 }
+
+@test "GITHUB_OUTPUT emission is machine-clean key=value (regression: log prefix corrupted keys)" {
+  seed_typical_vault
+  export GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/gh_output"
+  : >"${GITHUB_OUTPUT}"
+  run bash "${SWEEPER_SH}"
+  assert_success
+  run grep -vcE '^[a-z-]+=' "${GITHUB_OUTPUT}"
+  assert_output "0"
+  run grep -c '^candidates-count=4$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+  run jq -e '.secrets | length == 2' <(grep '^candidates-json=' "${GITHUB_OUTPUT}" | cut -d= -f2-)
+  assert_success
+}

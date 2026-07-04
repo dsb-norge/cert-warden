@@ -28,7 +28,7 @@ setup() {
   [ "${letsencryptServer}" = "acme-staging-v02.api.letsencrypt.org" ]
   [ "${acmeDirectoryUrl}" = "https://acme-staging-v02.api.letsencrypt.org/directory" ]
   [ "${legoDnsProvider}" = "azuredns" ]
-  [ "${digResolver}" = "1.1.1.1" ]
+  [ "${digArgs}" = "@1.1.1.1" ]
   [ -z "${legoExtraRunArgs}" ]
 }
 
@@ -44,22 +44,22 @@ setup() {
   export CW_ACME_DIRECTORY_URL="https://localhost:14000/dir"
   export CW_LEGO_DNS_PROVIDER="exec"
   export CW_LEGO_DNS_RESOLVERS="127.0.0.1:8053"
-  export CW_LEGO_EXTRA_ARGS="--dns.propagation-rns"
-  export CW_DNS_RESOLVER="127.0.0.1"
+  export CW_LEGO_EXTRA_ARGS="--dns.propagation.disable-ans"
+  export CW_DIG_ARGS="@127.0.0.1 -p 5354"
   source "${WARDEN_SH}"
   loadConfig
   [ "${acmeDirectoryUrl}" = "https://localhost:14000/dir" ]
   [ "${legoDnsProvider}" = "exec" ]
   [ "${legoDnsResolvers}" = "127.0.0.1:8053" ]
-  [ "${legoExtraRunArgs}" = "--dns.propagation-rns" ]
-  [ "${digResolver}" = "127.0.0.1" ]
+  [ "${legoExtraRunArgs}" = "--dns.propagation.disable-ans" ]
+  [ "${digArgs}" = "@127.0.0.1 -p 5354" ]
 }
 
 @test "getCommonLegoRunOptions honours the seams" {
   export CW_ACME_DIRECTORY_URL="https://localhost:14000/dir"
   export CW_LEGO_DNS_PROVIDER="exec"
   export CW_LEGO_DNS_RESOLVERS="127.0.0.1:8053"
-  export CW_LEGO_EXTRA_ARGS="--dns.propagation-rns"
+  export CW_LEGO_EXTRA_ARGS="--dns.propagation.disable-ans"
   source "${WARDEN_SH}"
   loadConfig
   legoDirPath="/tmp/lego-test"
@@ -73,7 +73,7 @@ setup() {
   assert_output --partial "--dns.resolvers 127.0.0.1:8053"
   assert_output --partial "--domains zone.example.test"
   assert_output --partial "--domains *.zone.example.test"
-  assert_output --partial "--dns.propagation-rns"
+  assert_output --partial "--dns.propagation.disable-ans"
   assert_output --partial "--pfx"
 }
 

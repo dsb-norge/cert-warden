@@ -28,7 +28,8 @@
 #     - CW_LEGO_DNS_PROVIDER:   lego DNS-01 provider (default: "azuredns"; tests use "exec")
 #     - CW_LEGO_DNS_RESOLVERS:  Space-separated host:port resolvers for lego's propagation checks
 #     - CW_LEGO_EXTRA_ARGS:     Extra args appended to every `lego run` (e.g. propagation flags)
-#     - CW_DNS_RESOLVER:        Resolver for the `dig` public-delegation check (default: 1.1.1.1)
+#     - CW_DIG_ARGS:            Extra dig args for the public-delegation NS check, appended after
+#                               the query (default: "@1.1.1.1"); tests use "@127.0.0.1 -p 5354"
 #
 # The script will:
 #   - Read all public DNS zones in the specified resource group
@@ -105,10 +106,18 @@ function loadConfig() {
 
   # Test seams (see the header + docs/contracts.md): every default is production behaviour.
   acmeDirectoryUrl="${CW_ACME_DIRECTORY_URL:-https://${letsencryptServer}/directory}"
+  # lego stores account material under accounts/<host>[_<port>], derived from the directory
+  # URL it was given — derive the same path so the account-key sanity checks and the
+  # CW_ACME_DIRECTORY_URL seam agree with lego's on-disk layout (port 443/none => bare host).
+  acmeAccountsServerDir="${acmeDirectoryUrl#*://}"
+  acmeAccountsServerDir="${acmeAccountsServerDir%%/*}"
+  acmeAccountsServerDir="${acmeAccountsServerDir%:443}"
+  acmeAccountsServerDir="${acmeAccountsServerDir/:/_}"
   legoDnsProvider="${CW_LEGO_DNS_PROVIDER:-azuredns}"
   legoDnsResolvers="${CW_LEGO_DNS_RESOLVERS:-1.1.1.1:53 8.8.8.8:53 9.9.9.9:53}"
   legoExtraRunArgs="${CW_LEGO_EXTRA_ARGS:-}"
-  digResolver="${CW_DNS_RESOLVER:-1.1.1.1}"
+  # Word-splitting is intended for digArgs (server + options), hence unquoted at the call site.
+  digArgs="${CW_DIG_ARGS:-@1.1.1.1}"
 
   # where to look for/store Let's Encrypt account details in KeyVault
   letsencryptAccountEmailSecretName="letsencrypt-${letsencryptEnvironment}-account-email"
@@ -224,7 +233,8 @@ function dns_zone_is_publicly_delegated() {
   mapfile -t _configuredNs < <(echo "${_zoneNsJson}" | jq -r '.[]')
 
   # Get public name servers from quad1
-  mapfile -t _publicNs < <(dig +short +timeout=5 NS "${_zoneName}" "@${digResolver}")
+  # shellcheck disable=SC2086 # digArgs word-splitting is intended (resolver + options)
+  mapfile -t _publicNs < <(dig +short +timeout=5 NS "${_zoneName}" ${digArgs})
 
   # Check if all configured name servers are present in public name servers
   local _ns _pns _found
@@ -658,8 +668,8 @@ function main() {
 
   # where to store account key on disk, depends on email and server
   # lego v5 stores the account key directly under the email dir (v4 had a 'keys/' subdir).
-  accountKeyPath="${legoAccountsPath}/${letsencryptServer}/${accountEmail}/${accountEmail}.key"
-  accountJsonPath="${legoAccountsPath}/${letsencryptServer}/${accountEmail}/account.json"
+  accountKeyPath="${legoAccountsPath}/${acmeAccountsServerDir}/${accountEmail}/${accountEmail}.key"
+  accountJsonPath="${legoAccountsPath}/${acmeAccountsServerDir}/${accountEmail}/account.json"
   mkdir -p "$(dirname "${accountKeyPath}")"
 
   # if we have credentials from KeyVault, store them in local file

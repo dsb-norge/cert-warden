@@ -1,0 +1,18 @@
+# EditorConfig (https://editorconfig.org) — shfmt reads this file natively.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{sh,bash,bats}]
+# shfmt options (native .editorconfig support)
+switch_case_indent = true
+
+[*.md]
+# Trailing double-space is meaningful in markdown
+trim_trailing_whitespace = false

@@ -1,0 +1,13 @@
+extends: default
+
+rules:
+  # GitHub workflow files routinely exceed 80 chars (expressions, URLs in comments).
+  line-length:
+    max: 140
+  # `on:` in workflow files is a key, not a boolean — the classic false positive.
+  truthy:
+    check-keys: false
+  # Workflows conventionally omit the document-start marker.
+  document-start: disable
+  comments:
+    min-spaces-from-content: 1

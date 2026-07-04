@@ -1,0 +1,12 @@
+# Test/coverage artifacts
+coverage/
+junit*.xml
+*.log
+
+# Local scratch
+.tmp/
+.env
+.env.*
+
+# Tooling
+node_modules/

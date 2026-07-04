@@ -1,0 +1,4 @@
+# Follow source'd files (lib/helpers.bash etc.); only allowed here, not via inline directives.
+external-sources=true
+# Resolve `source ./...` relative to the script being checked.
+source-path=SCRIPTDIR

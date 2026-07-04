@@ -184,7 +184,7 @@ jobs:
 
       - name: Evaluate and notify
         id: monitor
-        uses: dsb-norge/cert-warden/actions/monitor@v0.0.0 # x-release-please-version
+        uses: dsb-norge/cert-warden/actions/monitor@v1.0.0 # x-release-please-version
         with:
           metrics-file: "${{ runner.temp }}/cw-metrics/cert-warden-metrics-${{ inputs.environment }}.json"
           environment-label: ${{ inputs.environment }}

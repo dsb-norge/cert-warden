@@ -122,7 +122,7 @@ jobs:
           client-id: ${{ inputs.azure-client-id }}
 
       - name: Setup lego
-        uses: dsb-norge/cert-warden/actions/setup-lego@v0.0.0 # x-release-please-version
+        uses: dsb-norge/cert-warden/actions/setup-lego@v1.0.0 # x-release-please-version
         with:
           lego-version: ${{ inputs.lego-version }}
 
@@ -136,7 +136,7 @@ jobs:
 
       - name: Maintain certificates
         id: warden
-        uses: dsb-norge/cert-warden/actions/warden@v0.0.0 # x-release-please-version
+        uses: dsb-norge/cert-warden/actions/warden@v1.0.0 # x-release-please-version
         with:
           tenant-id: ${{ inputs.azure-tenant-id }}
           subscription-id: ${{ inputs.azure-subscription-id }}

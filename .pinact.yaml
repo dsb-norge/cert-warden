@@ -1,0 +1,9 @@
+# pinact configuration (CI job: pin-check).
+#
+# Internal refs (dsb-norge/cert-warden/...) are deliberately TAG-pinned, not SHA-pinned:
+# release-please maintains them via `x-release-please-version` annotations, and the PR preview
+# mechanism rewrites them to preview tags. pinact must leave them alone.
+version: 3
+ignore_actions:
+  - name: dsb-norge/cert-warden.*
+    ref: .*

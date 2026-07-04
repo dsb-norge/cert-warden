@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/dsb-norge/cert-warden/compare/v1.0.0...v1.0.1) (2026-07-04)
+
+
+### Bug Fixes
+
+* emit GITHUB_OUTPUT via set-output; regression-test machine-clean emission ([cdf3f83](https://github.com/dsb-norge/cert-warden/commit/cdf3f83eb62c02ca2aae03d256594073ab1cef6d))
+* GITHUB_OUTPUT emission via set-output + machine-clean regression tests ([1526cf9](https://github.com/dsb-norge/cert-warden/commit/1526cf9afd139720646286795a918b222a4aba0d))
+
 ## 1.0.0 (2026-07-04)
 
 

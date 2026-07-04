@@ -1,0 +1,126 @@
+name: PR preview tag
+#
+# Zero-manual-intervention testing from a calling repo: every same-repo PR gets a
+# `preview/pr-<N>` tag pointing at a GENERATED, DETACHED commit — the PR's tree with all
+# internal `uses: dsb-norge/cert-warden/...@vX.Y.Z` refs rewritten to the preview tag itself,
+# so workflows and actions resolve self-consistently through one ref. The PR branch is never
+# touched; nothing of this ever lands on main. A sticky comment on the PR carries the
+# copy-paste ref; the tag is force-moved on every push and deleted when the PR closes.
+#
+# Fork PRs are skipped (the job needs `contents: write`); maintainers can run the rewrite
+# locally for fork contributions.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  publish-preview:
+    name: "publish preview tag"
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the preview tag
+      pull-requests: write # sticky comment
+    steps:
+      # persist-credentials is deliberately true: this job pushes the preview tag using the
+      # workflow token. zizmor's artipacked audit is suppressed for this workflow in zizmor.yml.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: true
+
+      - name: Build preview commit and push tag
+        id: preview
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          previewRef="preview/pr-${PR_NUMBER}"
+
+          bash scripts/ci/rewrite-internal-refs.sh "${previewRef}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Detached generated commit: parent = the PR head (provenance), tree = rewritten
+          # working tree. The PR branch itself is never modified.
+          git add -A
+          tree="$(git write-tree)"
+          commit="$(git commit-tree "${tree}" -p "${HEAD_SHA}" \
+            -m "preview: ${previewRef} (generated from ${HEAD_SHA}, internal refs rewritten)")"
+          git tag -f "${previewRef}" "${commit}"
+          git push --force origin "refs/tags/${previewRef}"
+
+          {
+            echo "preview-ref=${previewRef}"
+            echo "preview-commit=${commit}"
+          } >>"${GITHUB_OUTPUT}"
+          echo "Published ${previewRef} -> ${commit} (parent ${HEAD_SHA})"
+
+      - name: Compose sticky comment
+        env:
+          PREVIEW_REF: ${{ steps.preview.outputs.preview-ref }}
+          PREVIEW_COMMIT: ${{ steps.preview.outputs.preview-commit }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          cat >preview-comment.md <<EOF
+          ### 🧪 Preview ref for this PR: \`${PREVIEW_REF}\`
+
+          Test this PR from a calling repo — internal refs are rewritten so everything resolves
+          at this one tag:
+
+          ~~~yaml
+          # reusable workflows
+          uses: dsb-norge/cert-warden/.github/workflows/reusable-warden.yml@${PREVIEW_REF}
+          # composite actions
+          uses: dsb-norge/cert-warden/actions/warden@${PREVIEW_REF}
+          ~~~
+
+          - Refreshed on every push to this PR (currently \`${HEAD_SHA:0:7}\` → generated commit \`${PREVIEW_COMMIT:0:7}\`).
+          - Deleted automatically when the PR closes — never merged, never on \`main\`.
+          EOF
+
+      - name: Upsert sticky comment
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: pr-preview
+          path: preview-comment.md
+
+  cleanup-preview:
+    name: "delete preview tag"
+    if: >-
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # delete the preview tag
+      pull-requests: write # drop the sticky comment
+    steps:
+      - name: Delete preview tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Tolerate an already-absent tag (e.g. PR closed before the first publish finished).
+          gh api -X DELETE "repos/${REPO}/git/refs/tags/preview/pr-${PR_NUMBER}" ||
+            echo "preview tag already absent"
+
+      - name: Drop sticky comment
+        uses: marocchino/sticky-pull-request-comment@0ea0beb66eb9baf113663a64ec522f60e49231c0 # v3.0.4
+        with:
+          header: pr-preview
+          delete: true

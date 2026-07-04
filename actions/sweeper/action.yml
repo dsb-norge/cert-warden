@@ -1,0 +1,67 @@
+name: "cert-sweeper"
+description: >-
+  Soft-delete orphaned/expired objects from the web-certs Key Vault: certificates/secrets
+  matching the target prefixes plus an expiry backstop, never touching protected prefixes.
+  Defaults to a DRY RUN (log-only=true). Assumes az login done (OIDC).
+
+inputs:
+  key-vault-name:
+    description: "The Key Vault to sweep."
+    required: true
+  log-only:
+    description: "true = evaluate and log only (default-safe); false = soft-delete."
+    required: false
+    default: "true"
+  max-deletions:
+    description: "Spike guard: abort (exit 1) when candidates exceed this."
+    required: false
+    default: "120"
+  sweep-expired:
+    description: "Also target expired, non-protected certificates."
+    required: false
+    default: "true"
+  target-cert-prefixes:
+    description: "Space-separated certificate name prefixes considered orphans-by-design."
+    required: false
+    default: "le-cert-staging-"
+  target-secret-prefixes:
+    description: "Space-separated secret name prefixes considered orphans-by-design."
+    required: false
+    default: "le-cert-staging- letsencrypt-staging-account-"
+  protected-prefixes:
+    description: "Space-separated prefixes that must NEVER be deleted (always wins)."
+    required: false
+    default: "letsencrypt-production-account- cert-"
+
+outputs:
+  candidates-count:
+    description: "Deletion candidates found."
+    value: ${{ steps.run.outputs.candidates-count }}
+  candidates-json:
+    description: "JSON object {certificates: [...], secrets: [...]}."
+    value: ${{ steps.run.outputs.candidates-json }}
+  deleted-count:
+    description: "Objects actually soft-deleted (0 in log-only mode)."
+    value: ${{ steps.run.outputs.deleted-count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Sweep
+      id: run
+      shell: bash
+      env:
+        CW_ACTION_NAME: sweeper
+        KV_NAME: ${{ inputs.key-vault-name }}
+        LOG_ONLY: ${{ inputs.log-only }}
+        MAX_DELETIONS: ${{ inputs.max-deletions }}
+        SWEEP_EXPIRED: ${{ inputs.sweep-expired }}
+        TARGET_CERT_PREFIXES: ${{ inputs.target-cert-prefixes }}
+        TARGET_SECRET_PREFIXES: ${{ inputs.target-secret-prefixes }}
+        PROTECTED_PREFIXES: ${{ inputs.protected-prefixes }}
+      run: |
+        set -o allexport
+        # shellcheck source=../../lib/helpers.bash
+        source "${GITHUB_ACTION_PATH}/../../lib/helpers.bash"
+        set +o allexport
+        bash "${GITHUB_ACTION_PATH}/sweeper.sh"

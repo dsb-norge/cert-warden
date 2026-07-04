@@ -331,7 +331,8 @@ jobs:
             rc=$?
           fi
           if [[ ${rc} -ne 0 ]]; then
-            echo "::warning::bats under kcov exited ${rc} (instrumentation side effects are a known kcov+bats caveat); coverage data below may be partial."
+            echo "::warning::bats under kcov exited ${rc} (known kcov+bats caveat);" \
+              "coverage data below may be partial."
           fi
           exit 0
 
@@ -348,6 +349,98 @@ jobs:
             echo "::warning::bash coverage ${pct}% is below the advisory threshold of ${threshold}%."
           fi
 
+  integration-tests:
+    name: "integration tests (L2: lego vs Pebble)"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Dogfood the composite action same-commit (L3): this is the exact step consumers run.
+      - name: Setup lego (via ./actions/setup-lego)
+        uses: ./actions/setup-lego
+
+      - name: Install bats + libraries
+        uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
+        with:
+          bats-version: ${{ env.BATS_VERSION }}
+          detik-install: false
+
+      - name: Pull harness images
+        run: docker compose -f tests/harness/docker-compose.pebble.yml pull --quiet
+
+      - name: Run integration suite
+        env:
+          BATS_LIB_PATH: /usr/lib
+        run: bats --print-output-on-failure tests/integration
+
+  action-smokes:
+    name: "action smokes (L3: uses ./)"
+    # Composite actions exercised same-commit as a consumer step would, with asserted outputs.
+    # (setup-lego is smoked inside integration-tests; the reusable workflows are covered by the
+    # preview-consume remote-fetch e2e — see pr-preview.yml.)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Prepare fixtures (metrics + az-shim state)
+        run: |
+          cat >"${RUNNER_TEMP}/metrics.json" <<'JSON'
+          [
+            {"zone":"ok.example.test","action":"none","kv_cert_name":"le-cert-production-ok-pfx",
+             "lifetime_fraction_remaining":0.85,"days_to_expiry":76,"error":""},
+            {"zone":"bad.example.test","action":"failed","kv_cert_name":"le-cert-production-bad-pfx",
+             "lifetime_fraction_remaining":null,"days_to_expiry":null,"error":"boom"}
+          ]
+          JSON
+          state="${RUNNER_TEMP}/az-state"
+          mkdir -p "${state}/secrets" "${state}/certs" "${state}/fixtures"
+          printf 'orphan' >"${state}/secrets/le-cert-staging-orphan-pfx"
+          printf 'keep' >"${state}/secrets/letsencrypt-production-account-key"
+          echo "CW_AZ_STATE_DIR=${state}" >>"${GITHUB_ENV}"
+          echo "${GITHUB_WORKSPACE}/tests/harness/az-shim" >>"${GITHUB_PATH}"
+
+      - name: Monitor action (evaluate-only)
+        id: monitor
+        uses: ./actions/monitor
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+          environment-label: "l3-smoke"
+
+      - name: Sweeper action (dry run against the shim)
+        id: sweeper
+        uses: ./actions/sweeper
+        with:
+          key-vault-name: "kv-l3-smoke"
+
+      - name: Assert outputs
+        env:
+          MON_SEVERITY: ${{ steps.monitor.outputs.severity }}
+          MON_FAILED: ${{ steps.monitor.outputs.failed-count }}
+          MON_NOTIFIED: ${{ steps.monitor.outputs.notified }}
+          SWEEP_CANDIDATES: ${{ steps.sweeper.outputs.candidates-count }}
+          SWEEP_DELETED: ${{ steps.sweeper.outputs.deleted-count }}
+          SWEEP_JSON: ${{ steps.sweeper.outputs.candidates-json }}
+        run: |
+          [[ "${MON_SEVERITY}" == "WARNING" && "${MON_FAILED}" == "1" ]] || {
+            echo "::error::monitor outputs unexpected: severity=${MON_SEVERITY} failed=${MON_FAILED}"
+            exit 1
+          }
+          [[ "${MON_NOTIFIED}" == "false" ]]
+          [[ "${SWEEP_CANDIDATES}" == "1" && "${SWEEP_DELETED}" == "0" ]] || {
+            echo "::error::sweeper outputs unexpected: cand=${SWEEP_CANDIDATES} del=${SWEEP_DELETED}"
+            exit 1
+          }
+          jq -e '.secrets == ["le-cert-staging-orphan-pfx"]' <<<"${SWEEP_JSON}" >/dev/null
+          echo "action smokes green"
+
   ci-conclusion:
     name: "ci-conclusion"
     # The single required status check. Fails if any needed job failed or was cancelled;
@@ -363,6 +456,8 @@ jobs:
       - private-ref-guard
       - unit-tests
       - coverage
+      - integration-tests
+      - action-smokes
     runs-on: ubuntu-latest
     permissions: {}
     steps:

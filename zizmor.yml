@@ -1,12 +1,20 @@
 # zizmor configuration — suppressions require a written justification here and are reviewed
 # like code. See docs/security-tooling.md.
 rules:
-  artipacked:
-    # These two workflows intentionally keep checkout credentials because they push:
-    #   - pr-preview.yml pushes the preview/pr-<N> tag with the workflow token
-    #   - release-please.yml pushes the floating major tag with the release App token
-    # Neither runs untrusted code: both operate on same-repo refs only (fork PRs are guarded
-    # out), and no build/test step executes within them.
+  unpinned-uses:
+    config:
+      policies:
+        # Internal refs are deliberately TAG-pinned (design D-6): release-please bumps them at
+        # release time and the PR preview mechanism rewrites them to preview tags. SHA-pinning
+        # them would break both. Everything else must be hash-pinned.
+        "dsb-norge/cert-warden/*": ref-pin
+        "*": hash-pin
+  github-env:
+    # setup-lego appends a runner.temp-derived dir to GITHUB_PATH — not attacker-influenced.
     ignore:
-      - pr-preview.yml
+      - action.yml # zizmor matches by file basename; only setup-lego writes env files today
+  artipacked:
+    # release-please.yml intentionally keeps checkout credentials (the App token) because it
+    # pushes the floating major tag. It runs no untrusted code.
+    ignore:
       - release-please.yml

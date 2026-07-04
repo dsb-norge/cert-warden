@@ -1,0 +1,106 @@
+name: preview-consume
+#
+# Remote-fetch e2e: consumes this repo's OWN reusable workflow and composite actions through
+# GitHub's real remote `uses:` mechanism — the same path a calling repo exercises. Dispatched
+# BY pr-preview.yml AT a preview/pr-<N> tag, where every internal ref below has been rewritten
+# to that tag, so the whole suite resolves self-consistently at one ref.
+#
+# This is what proves, on every PR: remote action fetch works, the shared lib/helpers.bash
+# resolves via GITHUB_ACTION_PATH/../../ in a remotely-fetched action (design decision D-7),
+# and the reusable-workflow wiring is callable. It needs no Azure: the monitor runs in
+# evaluate-only mode.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  consume-reusable-monitor:
+    # A real cross-repo-style call of the reusable workflow. No warden runs exist here, so the
+    # resolve step finds nothing and the monitor reports WARNING (absence is a signal) — which
+    # exercises resolve -> (no) download -> evaluate, exit 0.
+    permissions:
+      actions: read
+    uses: dsb-norge/cert-warden/.github/workflows/reusable-monitor.yml@v0.0.0 # x-release-please-version
+    with:
+      environment: "preview-e2e"
+      dry-run: true
+
+  assert-reusable-monitor:
+    needs: consume-reusable-monitor
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Assert evaluate-only outcome
+        env:
+          SEVERITY: ${{ needs.consume-reusable-monitor.outputs.severity }}
+        run: |
+          # No metrics in this repo => Layer C warning; anything else means the chain broke.
+          [[ "${SEVERITY}" == "WARNING" ]] || {
+            echo "::error::expected severity WARNING from the evaluate-only run, got '${SEVERITY}'"
+            exit 1
+          }
+          echo "reusable-monitor consumed remotely: severity=${SEVERITY} ✓"
+
+  consume-actions:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Setup lego (remote fetch)
+        id: lego
+        uses: dsb-norge/cert-warden/actions/setup-lego@v0.0.0 # x-release-please-version
+
+      - name: Assert lego installed
+        env:
+          LEGO_PATH: ${{ steps.lego.outputs.lego-path }}
+        run: |
+          lego --version
+          [[ -x "${LEGO_PATH}" ]]
+
+      - name: Prepare evaluate-only fixture
+        run: |
+          cat >"${RUNNER_TEMP}/metrics.json" <<'JSON'
+          [
+            {"zone":"a.example.test","action":"none","kv_cert_name":"le-cert-production-a-pfx",
+             "lifetime_fraction_remaining":0.10,"days_to_expiry":9,"error":""}
+          ]
+          JSON
+
+      - name: Monitor action (remote fetch — proves shared-lib resolution, D-7)
+        id: monitor
+        uses: dsb-norge/cert-warden/actions/monitor@v0.0.0 # x-release-please-version
+        with:
+          metrics-file: ${{ runner.temp }}/metrics.json
+          environment-label: "preview-e2e"
+          dry-run: "true"
+
+      - name: Assert monitor outputs
+        env:
+          SEVERITY: ${{ steps.monitor.outputs.severity }}
+          MINLF: ${{ steps.monitor.outputs.min-lifetime-fraction }}
+        run: |
+          [[ "${SEVERITY}" == "CRITICAL" && "${MINLF}" == "0.1" || "${MINLF}" == "0.10" ]] || {
+            echo "::error::unexpected monitor outputs: severity=${SEVERITY} min=${MINLF}"
+            exit 1
+          }
+          echo "monitor action consumed remotely: severity=${SEVERITY} min=${MINLF} ✓"
+
+  conclusion:
+    name: "preview-consume-conclusion"
+    if: always()
+    needs: [consume-reusable-monitor, assert-reusable-monitor, consume-actions]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Evaluate
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          echo "${NEEDS_JSON}" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad=$(echo "${NEEDS_JSON}" | jq -r '[to_entries[] | select(.value.result == "failure" or .value.result == "cancelled")] | length')
+          [[ "${bad}" == "0" ]] || exit 1

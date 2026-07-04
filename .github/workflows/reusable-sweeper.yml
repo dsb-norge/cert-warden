@@ -1,0 +1,86 @@
+name: reusable-sweeper
+#
+# The packaged sweeper shape: OIDC login (the cert-maintainer identity already holds the
+# needed Key Vault roles) -> sweep. DEFAULT IS A DRY RUN (log-only: true); see
+# docs/reference-usage.md for the graduation ladder to scheduled destructive sweeps.
+#
+# IMPORTANT caller contract: put this job in the SAME concurrency group as the warden for the
+# environment — both mutate the same vault and must never race.
+#
+# Caller permissions needed: id-token: write.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Environment label (for job naming/summaries)."
+        type: string
+        required: true
+      runs-on:
+        description: "Runner label with a network path to the Key Vault."
+        type: string
+        required: true
+      azure-tenant-id:
+        description: "Azure tenant id."
+        type: string
+        required: true
+      azure-subscription-id:
+        description: "Azure subscription id."
+        type: string
+        required: true
+      azure-client-id:
+        description: "Client id of the cert-maintainer identity."
+        type: string
+        required: true
+      key-vault-name:
+        description: "The Key Vault to sweep."
+        type: string
+        required: true
+      log-only:
+        description: "true = dry run (default-safe); false = soft-delete."
+        type: boolean
+        required: false
+        default: true
+      max-deletions:
+        description: "Spike guard: abort when candidates exceed this."
+        type: string
+        required: false
+        default: "120"
+    outputs:
+      candidates-count:
+        description: "Deletion candidates found."
+        value: ${{ jobs.sweep.outputs.candidates-count }}
+      candidates-json:
+        description: "JSON object {certificates: [...], secrets: [...]}."
+        value: ${{ jobs.sweep.outputs.candidates-json }}
+      deleted-count:
+        description: "Objects actually soft-deleted (0 in log-only mode)."
+        value: ${{ jobs.sweep.outputs.deleted-count }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sweep:
+    name: "sweep (${{ inputs.environment }})"
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      candidates-count: ${{ steps.sweep.outputs.candidates-count }}
+      candidates-json: ${{ steps.sweep.outputs.candidates-json }}
+      deleted-count: ${{ steps.sweep.outputs.deleted-count }}
+    steps:
+      - name: Azure login
+        uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          tenant-id: ${{ inputs.azure-tenant-id }}
+          subscription-id: ${{ inputs.azure-subscription-id }}
+          client-id: ${{ inputs.azure-client-id }}
+
+      - name: Sweep
+        id: sweep
+        uses: dsb-norge/cert-warden/actions/sweeper@v0.0.0 # x-release-please-version
+        with:
+          key-vault-name: ${{ inputs.key-vault-name }}
+          log-only: ${{ inputs.log-only }}
+          max-deletions: ${{ inputs.max-deletions }}

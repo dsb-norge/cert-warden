@@ -1,0 +1,60 @@
+# The L2 integration stack (docs/testing.md):
+#
+#   pebble        — Let's Encrypt's ACME test server; REAL ACME protocol, -strict mode.
+#                   Validates DNS-01 by querying challtestsrv. NO rate limits (by design).
+#   challtestsrv  — mock DNS + challenge responder; lego's `exec` hook writes TXT records to
+#                   its management API (:8055); lego's propagation check and Pebble's
+#                   validation both resolve against its DNS (:8053, udp+tcp — Pebble >= 2.10
+#                   queries DNS over TCP).
+#   coredns       — authoritative NS records for the test zones (:5354). challtestsrv cannot
+#                   serve NS records, and the warden's public-delegation check does `dig NS`.
+#
+# Vendored (not the upstream compose) because upstream doesn't publish the DNS port to the
+# host, and GHA `services:` can't override container commands (which this wiring needs).
+#
+# Determinism: PEBBLE_VA_NOSLEEP=1 (no random 0-15s validation sleeps) and
+# PEBBLE_WFE_NONCEREJECT=0 (default rejects 5% of valid nonces). One dedicated chaos scenario
+# re-runs with nonce rejection enabled instead.
+services:
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:2.10.1
+    command: -config test/config/pebble-config.json -strict -dnsserver 10.30.50.3:8053
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+      PEBBLE_AUTHZREUSE: "0" # always re-challenge; reuse would let scenarios dodge injected DNS faults
+    ports:
+      - "14000:14000" # ACME directory (https; trust anchor: pebble.minica.pem)
+      - "15000:15000" # management API (per-boot issuance root at /roots/0)
+    networks:
+      acmenet:
+        ipv4_address: 10.30.50.2
+
+  challtestsrv:
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1
+    command: -defaultIPv4 10.30.50.3 -http01 "" -https01 "" -tlsalpn01 ""
+    ports:
+      - "8055:8055" # management API (set-txt / clear-txt / set-servfail / request history)
+      - "8053:8053/udp" # DNS
+      - "8053:8053/tcp"
+    networks:
+      acmenet:
+        ipv4_address: 10.30.50.3
+
+  coredns:
+    image: coredns/coredns:1.12.0
+    command: -conf /data/Corefile
+    volumes:
+      - ./coredns:/data:ro
+    ports:
+      - "5354:53/udp"
+      - "5354:53/tcp"
+    networks:
+      acmenet:
+        ipv4_address: 10.30.50.4
+
+networks:
+  acmenet:
+    ipam:
+      config:
+        - subnet: 10.30.50.0/24

@@ -176,6 +176,32 @@ jobs:
         # full-length SHA with a version comment. --check: report, don't rewrite.
         run: pinact run --check
 
+      - name: Release-annotation consistency
+        # Annotated files and release-please extra-files must be the same set — drift ships
+        # releases with un-bumped internal refs (consumers would resolve a nonexistent tag).
+        run: bash scripts/ci/check-release-annotations.sh
+
+      - name: Validate renovate.json (when changed, and on the weekly canary)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # The real validator downloads the full renovate package (~200 MB) — run it only
+          # when it can matter: renovate.json changed in this PR, or the weekly drift canary.
+          if [[ "${EVENT}" == "pull_request" ]]; then
+            gh api "repos/${REPO}/pulls/${PR}/files" --paginate --jq '.[].filename' |
+              grep -qx 'renovate.json' || {
+              echo "renovate.json untouched — skipping validator"
+              exit 0
+            }
+          elif [[ "${EVENT}" != "schedule" && "${EVENT}" != "workflow_dispatch" ]]; then
+            echo "push event — validated on the PR; skipping"
+            exit 0
+          fi
+          npx --yes --package renovate renovate-config-validator renovate.json
+
   commitlint:
     name: "commitlint"
     if: github.event_name != 'schedule' # no commit range to lint on the drift canary

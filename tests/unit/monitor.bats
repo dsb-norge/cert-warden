@@ -167,3 +167,31 @@ healthy_record() {
   run grep -c "monitor: " "${GITHUB_STEP_SUMMARY}"
   assert_output "0"
 }
+
+@test "token acquisition failure degrades to warning, exit 0, outputs emitted (F2b guard)" {
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"e.example.test","action":"none","kv_cert_name":"le-cert-production-e-pfx","lifetime_fraction_remaining":0.05,"days_to_expiry":4,"error":""}'
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  printf '#!/usr/bin/env bash\necho "AADSTS: no token for you" >&2\nexit 1\n' >"${BATS_TEST_TMPDIR}/bin/az"
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+  export DRY_RUN="false" BOT_API_BASE="https://bot.invalid/api" \
+    BOT_API_AUDIENCE="api://x" BOT_ALIAS="from-x"
+  export GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/gh_output"
+  : >"${GITHUB_OUTPUT}"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "could not acquire a token"
+  run grep -c '^notified=false$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+}
+
+@test "PARTIAL bot configuration is an error annotation (misconfig), still exit 0" {
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"c.example.test","action":"none","kv_cert_name":"le-cert-production-c-pfx","lifetime_fraction_remaining":0.30,"days_to_expiry":27,"error":""}'
+  export DRY_RUN="false" BOT_API_BASE="https://bot.invalid/api" # audience + alias missing
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "::error::"
+  assert_output --partial "partial bot configuration"
+}

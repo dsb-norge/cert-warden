@@ -201,3 +201,22 @@ AZSTUB
   run grep -c "sweeper: " "${GITHUB_STEP_SUMMARY}"
   assert_output "0"
 }
+
+@test "az secret-list failure aborts the sweep (twin of the cert-list guard)" {
+  cat >"${BATS_TEST_TMPDIR}/bin/az" <<'AZSTUB'
+#!/usr/bin/env bash
+echo "az $*" >>"${AZ_STUB_CALLS}"
+case "$1 $2 $3" in
+  "keyvault certificate list") echo "[]" ;;
+  "keyvault secret list") echo "ERROR: throttled" >&2; exit 1 ;;
+  *) exit 0 ;;
+esac
+AZSTUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export LOG_ONLY="false"
+  run bash "${SWEEPER_SH}"
+  assert_failure
+  assert_output --partial "Failed to list secrets"
+  run grep -c "delete" "${AZ_STUB_CALLS}"
+  assert_output "0"
+}

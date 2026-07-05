@@ -240,3 +240,30 @@ JSON
   run grep -c "chain VERIFIED against test root" <(tail -5 "${CW_STATE}/calls.log")
   assert_output "1"
 }
+
+@test "e2e-8 force flags: force-all-new reissues over a valid cert; force-renewal forces renewal" {
+  # Runs against the chaos-configured Pebble from e2e-7 (single zone, valid cert in the
+  # vault). Also the only run with a step summary attached — asserting the warden's summary
+  # block (never otherwise executed; the markdown-corruption class needs a guard here too).
+  export GITHUB_STEP_SUMMARY="${BATS_TEST_TMPDIR}/summary.md"
+
+  # force-all-new: existing matching cert must be ignored and a NEW cert issued.
+  CERT_FORCE_ALL_NEW=true run_warden
+  assert_success
+  run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
+  assert_output "issued"
+
+  # The summary is real markdown, free of log prefixes:
+  run grep -c '^## Cert Warden' "${GITHUB_STEP_SUMMARY}"
+  assert_output "1"
+  run grep -c 'cw-test.internal' "${GITHUB_STEP_SUMMARY}"
+  assert_output "1"
+  run grep -c 'warden: ' "${GITHUB_STEP_SUMMARY}"
+  assert_output "0"
+
+  # force-renewal: matching cert + --renew-force => renewed now (ARI bypassed), action=forced.
+  CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
+  assert_output "forced"
+}

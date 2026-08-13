@@ -29,6 +29,8 @@ scoped, justified suppression — never a disabled job.
   (same design reason as above).
 - **Responding to a failure**: run `pinact run` locally to pin what you added, commit the
   result. Never hand-type a SHA — resolve it (`gh api repos/<r>/commits/<tag> --jq .sha`).
+  Bumping existing pins is `pinact run -u`; the full procedure is in
+  [dependency-bumps.md](dependency-bumps.md).
 
 ## The private-reference guard
 
@@ -54,6 +56,7 @@ scoped, justified suppression — never a disabled job.
   PRs like any change — CI (including the L2 suite) is the safety net; **lego major bumps**
   additionally need the module-path change in `actions/setup-lego` and a deliberate
   maintainer pass.
+- Reviewing a Renovate PR, or doing a sweep by hand: [dependency-bumps.md](dependency-bumps.md).
 
 ## Planned (adopt deliberately, not by drift)
 

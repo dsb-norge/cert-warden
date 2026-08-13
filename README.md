@@ -53,6 +53,7 @@ Full callers (schedules, monitoring, sweeper + its graduation ladder):
 | [development-and-ci.md](docs/development-and-ci.md) | Contributors: commits, preview refs, releases |
 | [testing.md](docs/testing.md) | Contributors: the test layers, the harness, the pitfalls catalogue |
 | [security-tooling.md](docs/security-tooling.md) | Maintainers: zizmor/pinact/guards and how to respond |
+| [dependency-bumps.md](docs/dependency-bumps.md) | Maintainers: how to bump deps and verify the bump |
 | [reference-usage-canary.md](docs/reference-usage-canary.md) | Prototype: caller-side LE-staging canary |
 | [docs/design/](docs/design/) | Design history (imported) |
 

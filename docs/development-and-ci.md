@@ -91,3 +91,8 @@ annotated tool versions (shfmt/actionlint/yamllint/zizmor/pinact/bats/lego), and
 container images. It must never touch internal `dsb-norge/cert-warden` refs
 (`ignoreDeps`) — those belong to release-please. lego majors additionally change the Go module
 path in `actions/setup-lego` and get validated against the L2 suite by a maintainer.
+
+Doing a bump by hand — or reviewing one Renovate opened — follows
+**[dependency-bumps.md](dependency-bumps.md)**: where each dependency surface lives, how to
+resolve "latest" per datasource, why the gates must be run at the *new* tool versions, and the
+`chore(deps):` vs `fix(deps):` rule that decides whether consumers get a release.

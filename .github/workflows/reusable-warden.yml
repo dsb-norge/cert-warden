@@ -57,7 +57,7 @@ on:
         type: string
         required: false
         # renovate: datasource=go depName=github.com/go-acme/lego/v5
-        default: "v5.2.2"
+        default: "v5.3.1"
       force-all-new:
         description: "Force new certificates for all zones."
         type: boolean

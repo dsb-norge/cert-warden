@@ -130,7 +130,7 @@ function loadConfig() {
   # NOTE: renewal timing is governed by ARI (RFC 9773 renewalInfo), which lego v5 enables by
   # default: lego queries Let's Encrypt's renewalInfo endpoint each run and renews within the
   # CA-suggested window (which LE can move earlier, e.g. for mass revocation). If ARI is ever
-  # unreachable, lego falls back to its fixed `--renew-days` threshold (default 30). lego v5.2.2 has
+  # unreachable, lego falls back to its fixed `--renew-days` threshold (default 30). lego v5.3.1 has
   # no dynamic / fraction-of-lifetime renewal option, so we rely on ARI + that default; revisit
   # `--renew-days` (or adopt a dynamic threshold once a lego release ships one) if Let's Encrypt
   # shortens certificate lifetimes enough that a 30-day fallback would never trigger.
@@ -537,9 +537,9 @@ function renewExistingCertificate() {
   #   --force-cert-domains : re-issue if the cert's domain set drifts from --domains (e.g. an A
   #                          record was added/removed), instead of renewing the stale SAN set.
   #   --renew-force        : only when an operator forces it (CERT_FORCE_RENEWAL); bypasses ARI.
-  # NB: lego v5.2.2 has no `--dynamic` (fraction-of-lifetime) flag — the only renewal knobs on
+  # NB: lego v5.3.1 has no `--dynamic` (fraction-of-lifetime) flag — the only renewal knobs on
   # `lego run` are ARI (default) and `--renew-days`. Do not add `--dynamic`; lego rejects it
-  # (verified against v5.2.2 AND master, 2026-06 — no such flag, no upstream issue/PR for one).
+  # (verified against v5.3.1 AND master, 2026-08 — no such flag, no upstream issue/PR for one).
   #
   # TODO(cert-warden): the ARI-unavailable fallback is lego's fixed `--renew-days` (default 30).
   #   That is correct for today's 90-day certs but would be wrong once LE issues short-lived certs

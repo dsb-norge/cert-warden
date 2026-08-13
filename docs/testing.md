@@ -147,3 +147,6 @@ bats tests/integration
 # everything CI runs statically
 shellcheck ... && shfmt -d . && yamllint --strict . && actionlint && zizmor . && pinact run --check
 ```
+
+Bumping any of those tools: run this same set **at the new versions** first — see
+[dependency-bumps.md](dependency-bumps.md) §4.

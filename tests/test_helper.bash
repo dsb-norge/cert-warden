@@ -6,7 +6,9 @@
 # your clones of bats-support/bats-assert (see docs/testing.md), e.g.:
 #   export BATS_LIB_PATH="$HOME/tools/bats-libs"
 
-export BATS_LIB_PATH="${BATS_LIB_PATH:-/usr/lib:${HOME}/tools/bats-libs}"
+# bats >=1.14 pre-seeds BATS_LIB_PATH (/usr/lib/bats), so a `:-` default would never fire and
+# the local-dev fallback would be dead. Append instead: caller-supplied entries keep priority.
+export BATS_LIB_PATH="${BATS_LIB_PATH:+${BATS_LIB_PATH}:}/usr/lib:${HOME}/tools/bats-libs"
 
 bats_load_library bats-support
 bats_load_library bats-assert

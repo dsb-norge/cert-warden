@@ -42,7 +42,7 @@ services:
         ipv4_address: 10.30.50.3
 
   coredns:
-    image: coredns/coredns:1.12.0
+    image: coredns/coredns:1.14.6
     command: -conf /data/Corefile
     volumes:
       - ./coredns:/data:ro

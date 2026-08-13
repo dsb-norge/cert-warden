@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/dsb-norge/cert-warden/compare/v1.0.1...v1.0.2) (2026-08-13)
+
+
+### Bug Fixes
+
+* **deps:** bump lego to v5.3.1 ([c450f23](https://github.com/dsb-norge/cert-warden/commit/c450f2346c92af57ad5d3294019c9126b287f570))
+
 ## [1.0.1](https://github.com/dsb-norge/cert-warden/compare/v1.0.0...v1.0.1) (2026-07-04)
 
 

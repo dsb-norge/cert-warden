@@ -12,6 +12,13 @@
   "prHourlyLimit": 4,
   "timezone": "UTC",
   "schedule": ["after 03:30am and before 7:30am"],
+  "packageRules": [
+    {
+      "description": "Harness images are consumed tag@digest: tags are mutable at the registry, so the digest is the actual pin. pinDigests makes Renovate add digests to new images and bump tag+digest together.",
+      "matchManagers": ["docker-compose"],
+      "pinDigests": true
+    }
+  ],
   "customManagers": [
     {
       "customType": "regex",

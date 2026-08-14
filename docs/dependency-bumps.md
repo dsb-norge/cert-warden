@@ -17,7 +17,7 @@ lockfile, no package manifest, no vendored code.
 | Third-party actions | `.github/workflows/*.yml`, `**/action.yml` | full 40-char SHA + `# vX.Y.Z` comment | pinact / Renovate |
 | CI tool versions | the `env:` block of `ci.yml` | value under a `# renovate:` annotation | Renovate |
 | lego (consumer-facing) | `actions/setup-lego/action.yml` and `reusable-warden.yml` input defaults | value under a `# renovate:` annotation | Renovate + maintainer |
-| Harness images | `tests/harness/docker-compose*.yml` | exact tag | Renovate |
+| Harness images | `tests/harness/docker-compose*.yml` | exact tag `@sha256:` digest | Renovate |
 | Internal refs | `dsb-norge/cert-warden/...@vX.Y.Z` | tag + `# x-release-please-version` | **release-please only** |
 
 Two things follow from the table:
@@ -77,7 +77,10 @@ regex manager requires the annotation to sit on the line immediately above:
 ZIZMOR_VERSION: "1.29.0"
 ```
 
-**Harness images** — edit the tag in the compose file.
+**Harness images** — edit the tag in the compose file, then refresh the digest to match:
+`docker buildx imagetools inspect <image>:<tag>` prints the manifest-list digest. The digest
+is the real pin — registry tags are mutable, so a tag-only line can silently change what CI
+pulls; Renovate maintains the pair automatically (`pinDigests` rule in `renovate.json`).
 
 ## 4. Verification — run the gates *at the new versions*
 

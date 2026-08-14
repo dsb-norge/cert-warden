@@ -17,7 +17,10 @@
 # re-runs with nonce rejection enabled instead.
 services:
   pebble:
-    image: ghcr.io/letsencrypt/pebble:2.10.1
+    # Tag AND digest: registry tags are mutable, digests are not — the digest is what
+    # actually freezes the harness (docs/security-tooling.md §mutable anchors). Renovate
+    # bumps tag+digest together (pinDigests rule in renovate.json).
+    image: ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199
     command: -config test/config/pebble-config.json -strict -dnsserver 10.30.50.3:8053
     environment:
       PEBBLE_VA_NOSLEEP: "1"
@@ -31,7 +34,7 @@ services:
         ipv4_address: 10.30.50.2
 
   challtestsrv:
-    image: ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:2.10.1@sha256:12ce21884def456bcf9786542113949e1f19dc7738d2c70e156c2d0c38a1405b
     command: -defaultIPv4 10.30.50.3 -http01 "" -https01 "" -tlsalpn01 ""
     ports:
       - "8055:8055" # management API (set-txt / clear-txt / set-servfail / request history)
@@ -42,7 +45,7 @@ services:
         ipv4_address: 10.30.50.3
 
   coredns:
-    image: coredns/coredns:1.14.6
+    image: coredns/coredns:1.14.6@sha256:900f9c109f7a33545d3c811516e8376df9019147b750f5ce3e254468769176ea
     command: -conf /data/Corefile
     volumes:
       - ./coredns:/data:ro

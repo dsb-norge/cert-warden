@@ -13,6 +13,12 @@ indent_size = 2
 # shfmt options (native .editorconfig support)
 switch_case_indent = true
 
+[tests/vendor/**]
+# Vendored upstream code (bats helper libs) stays byte-identical to upstream so re-vendor
+# diffs are reviewable — never reformat it. shfmt honors `ignore` natively; shellcheck is
+# excluded via the pathspec in ci.yml's shellcheck step.
+ignore = true
+
 [*.md]
 # Trailing double-space is meaningful in markdown
 trim_trailing_whitespace = false

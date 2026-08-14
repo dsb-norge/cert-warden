@@ -18,6 +18,8 @@ any diff appearing here.
 | Third-party actions | `.github/workflows/*.yml`, `**/action.yml` | full 40-char SHA + `# vX.Y.Z` comment | pinact / Renovate |
 | CI tool versions | the `env:` block of `ci.yml` | value under a `# renovate:` annotation | Renovate |
 | commitlint (npm) | root `package.json` + `package-lock.json` | exact versions + lockfile integrity hashes | Renovate |
+| bats-core | `BATS_CORE_REF` in the `env:` block of `ci.yml` | tag`@`commit-SHA, git-verified at install | Renovate |
+| bats helper libs | `tests/vendor/` | vendored copies ([tests/vendor/README.md](../tests/vendor/README.md)) | maintainer |
 | lego (consumer-facing) | `actions/setup-lego/action.yml` and `reusable-warden.yml` input defaults | value under a `# renovate:` annotation | Renovate + maintainer |
 | Harness images | `tests/harness/docker-compose*.yml` | exact tag `@sha256:` digest | Renovate |
 | Internal refs | `dsb-norge/cert-warden/...@vX.Y.Z` | tag + `# x-release-please-version` | **release-please only** |

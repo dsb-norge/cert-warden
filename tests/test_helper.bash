@@ -2,20 +2,20 @@
 #
 # Shared bats test helper. Loaded by every suite via `load ../test_helper`.
 #
-# Library resolution: CI (bats-core/bats-action) exports BATS_LIB_PATH; locally, point it at
-# your clones of bats-support/bats-assert (see docs/testing.md), e.g.:
-#   export BATS_LIB_PATH="$HOME/tools/bats-libs"
-
-# bats >=1.14 pre-seeds BATS_LIB_PATH (/usr/lib/bats), so a `:-` default would never fire and
-# the local-dev fallback would be dead. Append instead: caller-supplied entries keep priority.
-export BATS_LIB_PATH="${BATS_LIB_PATH:+${BATS_LIB_PATH}:}/usr/lib:${HOME}/tools/bats-libs"
-
-bats_load_library bats-support
-bats_load_library bats-assert
+# Library resolution: bats-support/bats-assert are VENDORED in tests/vendor (see its README
+# for the supply-chain rationale) — no setup needed locally or in CI. Caller-supplied
+# BATS_LIB_PATH entries keep priority; /usr/lib and ~/tools/bats-libs remain as fallbacks.
 
 # Repo root (tests/ is one level below).
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 export REPO_ROOT
+
+# bats >=1.14 pre-seeds BATS_LIB_PATH (/usr/lib/bats), so a `:-` default would never fire and
+# the appends below would be dead behind it. Append instead: caller entries keep priority.
+export BATS_LIB_PATH="${BATS_LIB_PATH:+${BATS_LIB_PATH}:}${REPO_ROOT}/tests/vendor:/usr/lib:${HOME}/tools/bats-libs"
+
+bats_load_library bats-support
+bats_load_library bats-assert
 
 WARDEN_SH="${REPO_ROOT}/actions/warden/cert-warden.sh"
 MONITOR_SH="${REPO_ROOT}/actions/monitor/monitor.sh"

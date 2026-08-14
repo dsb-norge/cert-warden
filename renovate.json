@@ -22,13 +22,21 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Tool versions declared as env vars/inputs annotated with `# renovate: datasource=... depName=...` on the preceding line.",
+      "description": "Tool versions declared as env vars/inputs annotated with `# renovate: datasource=... depName=...` on the preceding line. Values must not contain `@` — tag@sha pairs belong to the digest-pair manager below.",
       "fileMatch": [
         "^\\.github/workflows/.+\\.ya?ml$",
         "^actions/.+/action\\.ya?ml$"
       ],
       "matchStrings": [
-        "# renovate: datasource=(?<datasource>[a-z0-9-]+?) depName=(?<depName>[^\\s]+?)(?: versioning=(?<versioning>[^\\s]+?))?\\n\\s*[A-Za-z0-9_-]+:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?\\s"
+        "# renovate: datasource=(?<datasource>[a-z0-9-]+?) depName=(?<depName>[^\\s]+?)(?: versioning=(?<versioning>[^\\s]+?))?\\n\\s*[A-Za-z0-9_-]+:\\s*[\"']?(?<currentValue>[^\"'\\s@]+)[\"']?\\s"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "Annotated tag@commit pairs (`vX.Y.Z@<40-hex sha>`, e.g. BATS_CORE_REF): the sha is the enforced pin (verified at install), the tag is for humans. github-tags digests resolve to the tag's commit, so Renovate bumps both halves together.",
+      "fileMatch": ["^\\.github/workflows/.+\\.ya?ml$"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z0-9-]+?) depName=(?<depName>[^\\s]+?)\\n\\s*[A-Za-z0-9_-]+:\\s*[\"']?(?<currentValue>[^\"'\\s@]+)@(?<currentDigest>[a-f0-9]{40})[\"']?\\s"
       ]
     }
   ]

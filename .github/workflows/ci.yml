@@ -231,6 +231,22 @@ jobs:
       # the executed code. npm ci verifies every package against the committed lockfile's
       # integrity hashes; --ignore-scripts blocks install hooks. Same @commitlint libraries,
       # same `results` output shape (docs/security-tooling.md §commitlint).
+      - name: Lockfile invariants
+        # A future lockfile change must not silently introduce non-registry sources or drop
+        # integrity hashes — those two properties are what make the lockfile a pin at all.
+        run: |
+          jq -e '
+            [.packages | to_entries[] | select(.key != "") | .value
+             | select((.resolved // "" | startswith("https://registry.npmjs.org/")) | not)
+            ] as $badSrc |
+            [.packages | to_entries[] | select(.key != "") | .value
+             | select(has("resolved") and (has("integrity") | not))
+            ] as $noHash |
+            if ($badSrc | length) == 0 and ($noHash | length) == 0 then true
+            else error("lockfile invariant violated: \($badSrc | length) non-registry, \($noHash | length) without integrity")
+            end' package-lock.json >/dev/null
+          echo "lockfile invariants hold (registry-only + integrity everywhere)"
+
       - name: Lint commits
         id: commitlint
         continue-on-error: true # the job fails at the end; first we build the explainer

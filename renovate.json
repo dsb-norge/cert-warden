@@ -17,6 +17,11 @@
       "description": "Harness images are consumed tag@digest: tags are mutable at the registry, so the digest is the actual pin. pinDigests makes Renovate add digests to new images and bump tag+digest together.",
       "matchManagers": ["docker-compose"],
       "pinDigests": true
+    },
+    {
+      "description": "npm cooldown: never adopt a version younger than 14 days. Historic npm compromises are caught and yanked within days of publish — soak time is the cheapest effective control (extended dependency assessment, 2026-08-14).",
+      "matchManagers": ["npm"],
+      "minimumReleaseAge": "14 days"
     }
   ],
   "customManagers": [

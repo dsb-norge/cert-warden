@@ -296,12 +296,15 @@ jobs:
             ].join('\n');
             fs.writeFileSync('commitlint-comment.md', body);
 
+      # In-repo upsert instead of marocchino/sticky-pull-request-comment — same marker
+      # format, so pre-switch comments update in place (scripts/ci/sticky-comment.sh).
       - name: Upsert sticky comment
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
-        with:
-          header: commitlint
-          path: commitlint-comment.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash scripts/ci/sticky-comment.sh upsert commitlint commitlint-comment.md
 
       - name: Fail if commitlint failed
         if: steps.commitlint.outcome == 'failure'

@@ -17,8 +17,15 @@ time, but by commit SHA with cryptographic verification: see `scripts/ci/install
 | bats-support | github.com/bats-core/bats-support | v0.3.0 | `24a72e14349690bcbf7c151b9d2d1cdd32d36eb1` |
 | bats-assert | github.com/bats-core/bats-assert | v2.1.0 | `78fa631d1370562d2cd4a1390989e706158e7bf0` |
 
-Only `load.bash`, `src/` and `LICENSE` are vendored (both libraries are CC0 1.0); upstream
-docs and self-tests are omitted. `bats-file` is not vendored because no suite loads it.
+Only `load.bash`, `src/` and `LICENSE` are vendored; upstream docs and self-tests are
+omitted. `bats-file` is not vendored because no suite loads it.
+
+**Licensing:** both libraries are **CC0 1.0 Universal** — a public-domain dedication, so
+redistribution here (a public MIT repo) is unconditionally permitted and attribution is not
+legally required. We keep the upstream `LICENSE` files and in-file dedication headers
+byte-identical anyway, and this README records provenance — more than CC0 asks, deliberately.
+(bats-core itself is MIT but is *not* vendored — CI fetches it at run time, so this repo
+never redistributes it.)
 
 **Re-vendoring** (rarely needed — upstream is dormant): pick the new tag, resolve its commit
 (`gh api repos/bats-core/<lib>/commits/<tag> --jq .sha`), then fetch **over the git protocol

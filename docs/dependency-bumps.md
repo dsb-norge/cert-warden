@@ -100,7 +100,7 @@ normal `PATH`:
 ```bash
 GOBIN=/tmp/cw-tools go install mvdan.cc/sh/v3/cmd/shfmt@<new>
 GOBIN=/tmp/cw-tools go install github.com/rhysd/actionlint/cmd/actionlint@<new>
-python3 -m venv /tmp/cw-venv && /tmp/cw-venv/bin/pip install "yamllint==<new>" "zizmor==<new>"
+python3 -m venv /tmp/cw-venv && /tmp/cw-venv/bin/pip install --only-binary :all: "yamllint==<new>" "zizmor==<new>"
 export PATH="/tmp/cw-tools:$PATH"
 ```
 

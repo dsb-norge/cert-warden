@@ -121,8 +121,11 @@ jobs:
           persist-credentials: false
 
       - name: Install and run yamllint
+        # --only-binary blocks sdist build hooks: version pins freeze the resolved versions,
+        # but a compromised transitive sdist (pyyaml/pathspec float) could otherwise run
+        # arbitrary code at install time. Wheels install without executing anything.
         run: |
-          pip install --quiet "yamllint==${YAMLLINT_VERSION}"
+          pip install --quiet --only-binary :all: "yamllint==${YAMLLINT_VERSION}"
           yamllint --strict .
 
   security-zizmor:
@@ -138,7 +141,9 @@ jobs:
           persist-credentials: false
 
       - name: Install zizmor
-        run: pip install --quiet "zizmor==${ZIZMOR_VERSION}"
+        # --only-binary: same rationale as the yamllint install — no sdist build hooks.
+        run: |
+          pip install --quiet --only-binary :all: "zizmor==${ZIZMOR_VERSION}"
 
       - name: Run zizmor (gate)
         # Non-zero exit on findings fails the job; suppressions live in zizmor.yml with a

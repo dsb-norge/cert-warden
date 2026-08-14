@@ -56,8 +56,9 @@ a full registration + issuance still succeeds through the retry path against the
 
 ## 3. Writing unit tests (L1)
 
-- bats-core + bats-assert/support (installed by `bats-core/bats-action` in CI; locally clone
-  them and `export BATS_LIB_PATH`). Load `tests/test_helper.bash`.
+- bats-core (CI installs it at a verified commit via `scripts/ci/install-bats.sh`; locally
+  any bats >= 1.14 works) + bats-support/bats-assert (vendored in `tests/vendor/` — zero
+  setup, locally and in CI). Load `tests/test_helper.bash`.
 - The warden is **sourced** (its source-guard means no side effects); call `loadConfig` after
   exporting config (`export_dummy_warden_env`), then exercise functions directly.
 - monitor/sweeper are **run as processes** (their production invocation); assert on output,
@@ -137,8 +138,7 @@ integration layer drives the warden's whole main flow on top of that.
 ## 7. Running locally
 
 ```bash
-# unit
-export BATS_LIB_PATH=~/tools/bats-libs   # clones of bats-support/bats-assert
+# unit (helper libs are vendored in tests/vendor — no BATS_LIB_PATH setup needed)
 bats tests/unit
 
 # integration (docker + lego v5 on PATH)

@@ -127,11 +127,15 @@ jobs:
           - Deleted automatically when the PR closes — never merged, never on \`main\`.
           EOF
 
+      # In-repo upsert instead of marocchino/sticky-pull-request-comment. Beyond dropping a
+      # bus-factor-1 dependency: this job mints an App token (contents+workflows write), and
+      # same-job steps share the runner — no third-party code belongs next to that token.
       - name: Upsert sticky comment
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
-        with:
-          header: pr-preview
-          path: preview-comment.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash scripts/ci/sticky-comment.sh upsert pr-preview preview-comment.md
 
   preview-consume-e2e:
     name: "preview-consume-e2e"
@@ -192,8 +196,16 @@ jobs:
           gh api -X DELETE "repos/${REPO}/git/refs/tags/preview/pr-${PR_NUMBER}" ||
             echo "preview tag already absent"
 
-      - name: Drop sticky comment
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+      # The PR merge ref can be gone on closed events — check out the default branch just to
+      # get scripts/ci/sticky-comment.sh (single source of the marker format).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          header: pr-preview
-          delete: true
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Drop sticky comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash scripts/ci/sticky-comment.sh delete pr-preview

@@ -5,6 +5,8 @@ name: CI
 #                private-reference guard (this file, always fast)
 #   L1 unit    — bats suites (added with the scripts)
 #   L2/L3      — integration harness and workflow self-tests (added with the harness/actions)
+#   weekly     — drift canary (all of the above on a schedule) + mutable-anchor watchdog
+#                (docs/security-tooling.md)
 #
 # A single aggregated job, `ci-conclusion`, is the only check branch protection requires —
 # extend its `needs` list when adding jobs.
@@ -33,10 +35,15 @@ env:
   ZIZMOR_VERSION: "1.29.0"
   # renovate: datasource=go depName=github.com/suzuki-shunsuke/pinact/v4
   PINACT_VERSION: "v4.1.1"
-  # renovate: datasource=github-releases depName=bats-core/bats-core
-  BATS_VERSION: "1.14.0"
+  # Tag@commit pair: the commit sha is what installs (scripts/ci/install-bats.sh verifies it
+  # over the git protocol); the tag half is for humans and Renovate. github-tags digests
+  # resolve to the tag's commit, so Renovate bumps both halves together.
+  # renovate: datasource=github-tags depName=bats-core/bats-core
+  BATS_CORE_REF: "v1.14.0@eb7f42f8d608ac693d7a4b67474f6714ea68cfc5"
   # renovate: datasource=rubygems depName=bashcov
   BASHCOV_VERSION: "3.3.0"
+  # renovate: datasource=go depName=golang.org/x/vuln
+  GOVULNCHECK_VERSION: "v1.7.0"
 
 # Default-deny; each job grants only what it needs.
 permissions: {}
@@ -70,8 +77,9 @@ jobs:
       - name: shellcheck
         run: |
           # .shellcheckrc provides external-sources + source-path. shellcheck >= 0.7 parses
-          # .bats files too. Empty file set is a pass (early scaffolding).
-          mapfile -t files < <(git ls-files '*.sh' '*.bash' '*.bats')
+          # .bats files too. Empty file set is a pass (early scaffolding). tests/vendor is
+          # vendored upstream code kept byte-identical for diffability — not ours to lint.
+          mapfile -t files < <(git ls-files '*.sh' '*.bash' '*.bats' ':!tests/vendor')
           if ((${#files[@]} == 0)); then
             echo "no shell files yet"
             exit 0
@@ -117,8 +125,11 @@ jobs:
           persist-credentials: false
 
       - name: Install and run yamllint
+        # --only-binary blocks sdist build hooks: version pins freeze the resolved versions,
+        # but a compromised transitive sdist (pyyaml/pathspec float) could otherwise run
+        # arbitrary code at install time. Wheels install without executing anything.
         run: |
-          pip install --quiet "yamllint==${YAMLLINT_VERSION}"
+          pip install --quiet --only-binary :all: "yamllint==${YAMLLINT_VERSION}"
           yamllint --strict .
 
   security-zizmor:
@@ -134,7 +145,9 @@ jobs:
           persist-credentials: false
 
       - name: Install zizmor
-        run: pip install --quiet "zizmor==${ZIZMOR_VERSION}"
+        # --only-binary: same rationale as the yamllint install — no sdist build hooks.
+        run: |
+          pip install --quiet --only-binary :all: "zizmor==${ZIZMOR_VERSION}"
 
       - name: Run zizmor (gate)
         # Non-zero exit on findings fails the job; suppressions live in zizmor.yml with a
@@ -213,14 +226,38 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0 # commitlint needs history to lint the commit range
+          fetch-depth: 0 # lint-commits.mjs reads the commit range from git history
+
+      # Lockfile-pinned commitlint instead of wagoid/commitlint-github-action: that action's
+      # SHA pin pulled a MUTABLE Docker Hub tag at runtime — the pin froze the wrapper, not
+      # the executed code. npm ci verifies every package against the committed lockfile's
+      # integrity hashes; --ignore-scripts blocks install hooks. Same @commitlint libraries,
+      # same `results` output shape (docs/security-tooling.md §commitlint).
+      - name: Lockfile invariants
+        # A future lockfile change must not silently introduce non-registry sources or drop
+        # integrity hashes — those two properties are what make the lockfile a pin at all.
+        run: |
+          jq -e '
+            [.packages | to_entries[] | select(.key != "") | .value
+             | select((.resolved // "" | startswith("https://registry.npmjs.org/")) | not)
+            ] as $badSrc |
+            [.packages | to_entries[] | select(.key != "") | .value
+             | select(has("resolved") and (has("integrity") | not))
+            ] as $noHash |
+            if ($badSrc | length) == 0 and ($noHash | length) == 0 then true
+            else error("lockfile invariant violated: \($badSrc | length) non-registry, \($noHash | length) without integrity")
+            end' package-lock.json >/dev/null
+          echo "lockfile invariants hold (registry-only + integrity everywhere)"
 
       - name: Lint commits
         id: commitlint
         continue-on-error: true # the job fails at the end; first we build the explainer
-        uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
-        with:
-          configFile: .commitlintrc.yml
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --silent
+          node scripts/ci/lint-commits.mjs "${BASE_SHA}" "${HEAD_SHA}"
 
       - name: Compose explainer comment
         id: compose
@@ -284,18 +321,85 @@ jobs:
             ].join('\n');
             fs.writeFileSync('commitlint-comment.md', body);
 
+      # In-repo upsert instead of marocchino/sticky-pull-request-comment — same marker
+      # format, so pre-switch comments update in place (scripts/ci/sticky-comment.sh).
       - name: Upsert sticky comment
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
-        with:
-          header: commitlint
-          path: commitlint-comment.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: bash scripts/ci/sticky-comment.sh upsert commitlint commitlint-comment.md
 
       - name: Fail if commitlint failed
         if: steps.commitlint.outcome == 'failure'
         run: |
           echo "::error::One or more commit messages are not valid conventional commits (see the sticky PR comment)."
           exit 1
+
+  drift-watchdog:
+    name: "mutable-anchor watchdog"
+    # Class-level mitigation for what SHA/digest pins cannot see: an upstream re-pointing
+    # the NAME we pinned from (re-pushed registry tag, moved git tag, wheel added to an old
+    # PyPI release). Weekly + dispatch; on PRs only when the watchdog itself changes.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check mutable anchors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [[ "${EVENT}" == "pull_request" ]]; then
+            gh api "repos/${REPO}/pulls/${PR}/files" --paginate --jq '.[].filename' |
+              grep -qE '^(scripts/ci/check-mutable-anchors\.sh|\.github/mutable-anchors\.json)$' || {
+              echo "watchdog untouched — skipping on PR (runs weekly + on dispatch)"
+              exit 0
+            }
+          fi
+          bash scripts/ci/check-mutable-anchors.sh
+
+      # Weekly advisory re-check of the production client binary: pins freeze versions,
+      # advisories move. WARN-ONLY by design — lego links all ~150 DNS providers into one
+      # binary, so symbol-presence findings routinely include code the azuredns path never
+      # calls (the 2026-08 transitive audit traced the current findings to gRPC client paths
+      # only gcloud/yandex providers use). A new finding is a signal to read, not an
+      # automatic red; reachability assessment belongs to a human (dependency-bumps.md §5).
+      - name: Setup lego (pinned, same path consumers use)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: ./actions/setup-lego
+
+      - name: Install govulncheck (cached)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: ./.github/actions/setup-go-tool
+        with:
+          module: golang.org/x/vuln/cmd/govulncheck
+          version: ${{ env.GOVULNCHECK_VERSION }}
+          binary: govulncheck
+
+      - name: govulncheck the lego binary (warn-only)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          rc=0
+          out="$(govulncheck -mode=binary "$(command -v lego)" 2>&1)" || rc=$?
+          echo "${out}"
+          {
+            echo "### govulncheck (lego binary, weekly advisory re-check — warn-only)"
+            echo '```'
+            echo "${out}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+          if ((rc != 0)); then
+            echo "::warning::govulncheck reports findings in the lego binary — read the job summary;" \
+              "assess reachability for the azuredns path before acting."
+          fi
 
   private-ref-guard:
     name: "private-reference guard"
@@ -325,20 +429,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install bats + libraries
-        uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
-        with:
-          bats-version: ${{ env.BATS_VERSION }}
-          detik-install: false # kubernetes-oriented; not used here
-          # User-writable paths: the action caches its installs, and cache restores into the
-          # root-owned /usr/lib defaults fail (tar exit 2 warnings on every run).
-          support-path: ${{ runner.temp }}/bats-libs/bats-support
-          assert-path: ${{ runner.temp }}/bats-libs/bats-assert
-          file-path: ${{ runner.temp }}/bats-libs/bats-file
+      # Pinned-commit install instead of bats-core/bats-action: the action fetched bats and
+      # its helper libs by MUTABLE tag with no checksum. Helper libs are vendored in
+      # tests/vendor (test_helper.bash resolves them — no BATS_LIB_PATH needed here).
+      - name: Install bats (verified commit)
+        run: bash scripts/ci/install-bats.sh
 
       - name: Run unit tests
-        env:
-          BATS_LIB_PATH: ${{ runner.temp }}/bats-libs
         run: bats --print-output-on-failure tests/unit
 
   integration-tests:
@@ -355,14 +452,8 @@ jobs:
       - name: Setup lego (via ./actions/setup-lego)
         uses: ./actions/setup-lego
 
-      - name: Install bats + libraries
-        uses: bats-core/bats-action@77d6fb60505b4d0d1d73e48bd035b55074bbfb43 # 4.0.0
-        with:
-          bats-version: ${{ env.BATS_VERSION }}
-          detik-install: false
-          support-path: ${{ runner.temp }}/bats-libs/bats-support
-          assert-path: ${{ runner.temp }}/bats-libs/bats-assert
-          file-path: ${{ runner.temp }}/bats-libs/bats-file
+      - name: Install bats (verified commit)
+        run: bash scripts/ci/install-bats.sh
 
       - name: Install bashcov
         # Coverage rides this job so the number spans L1+L2 (the integration suite drives the
@@ -375,8 +466,6 @@ jobs:
         run: docker compose -f tests/harness/docker-compose.pebble.yml pull --quiet
 
       - name: Run unit + integration suites (instrumented)
-        env:
-          BATS_LIB_PATH: ${{ runner.temp }}/bats-libs
         run: |
           bashcov --root "${PWD}" -- bats --print-output-on-failure tests/unit tests/integration |
             tee /tmp/bats-coverage.log
@@ -505,6 +594,7 @@ jobs:
       - security-zizmor
       - pin-check
       - commitlint
+      - drift-watchdog
       - private-ref-guard
       - unit-tests
       - integration-tests

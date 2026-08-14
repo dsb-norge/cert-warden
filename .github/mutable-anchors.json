@@ -1,0 +1,25 @@
+{
+  "$comment": "Recorded expectations for scripts/ci/check-mutable-anchors.sh — ONLY the anchors that cannot be derived from the repo's own pins. Everything derivable (harness image digests from the compose file, BATS_CORE_REF and tool versions from ci.yml's env block) is read from those files at check time, so routine Renovate bumps never require touching this manifest. See the script header for the threat model.",
+  "vendored-github-tags": [
+    {
+      "repo": "bats-core/bats-support",
+      "tag": "v0.3.0",
+      "commit": "24a72e14349690bcbf7c151b9d2d1cdd32d36eb1",
+      "why": "vendored in tests/vendor so a moved upstream tag no longer reaches CI — but a moved tag on a dependency we carry is a strong upstream-compromise signal worth a weekly look"
+    },
+    {
+      "repo": "bats-core/bats-assert",
+      "tag": "v2.1.0",
+      "commit": "78fa631d1370562d2cd4a1390989e706158e7bf0",
+      "why": "same as bats-support"
+    }
+  ],
+  "rubygems": [
+    {
+      "gem": "bashcov",
+      "version": "3.3.0",
+      "sha256": "9a761b6e36598f74897ead922cc04f85de3d1362f54a595c8eb6fcf5cb139c31",
+      "why": "installed in CI without a lockfile; rubygems versions are immutable by policy — this verifies the policy holds for the exact artifact we execute. The version here must match BASHCOV_VERSION in ci.yml; the check fails loudly when a bump forgets this file."
+    }
+  ]
+}

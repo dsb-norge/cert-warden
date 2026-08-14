@@ -47,7 +47,34 @@ scoped, justified suppression — never a disabled job.
 - **What/why**: conventional commits drive release-please (versions + public changelog); this
   repo merges with merge commits, so every commit must parse. Failures post a sticky PR
   comment with per-commit reasons and the reword recipe.
-- **Local prevention**: `scripts/install-git-hooks.sh`.
+- **How**: `scripts/ci/lint-commits.mjs` + the root `package.json`/`package-lock.json`
+  (`npm ci --ignore-scripts` — the lockfile's integrity hashes pin the whole dependency
+  tree; `--ignore-scripts` blocks npm install hooks). It deliberately replaced
+  `wagoid/commitlint-github-action`: that action's `action.yml` pulled a **mutable** Docker
+  Hub tag at runtime, so our SHA pin froze the wrapper but not the executed code — the one
+  thing a pin is for. The script uses the same `@commitlint/*` libraries the action wrapped
+  and emits the same per-commit `results` output.
+- **Local prevention**: `scripts/install-git-hooks.sh` (the hook runs the same lockfile-pinned
+  install).
+
+## Mutable-anchor watchdog
+
+- **What/why**: a SHA or digest pin freezes what executes, but it cannot tell you when the
+  upstream *name* you pinned from starts meaning something else — a re-pushed registry tag,
+  a moved git tag, a wheel quietly added to an old PyPI release (which pip would prefer on
+  the next install despite the version pin). None of those change a byte in this repo. The
+  2026-08 dependency assessment found this "mutable anchor" pattern was the one systematic
+  gap in an otherwise strong pin discipline, so it gets a systematic control:
+  `scripts/ci/check-mutable-anchors.sh` verifies every such anchor in the weekly drift
+  canary (`drift-watchdog` job) and fails on drift.
+- **Zero-maintenance by design**: expectations are derived from the repo's own pins
+  (compose digests, `BATS_CORE_REF`, tool versions), so Renovate bumps never touch it. Only
+  underivable values live in `.github/mutable-anchors.json` — and those checks cross-verify
+  against the ci.yml pin so a forgotten manifest update fails loudly.
+- **Responding to a red watchdog**: drift is *upstream* news, not necessarily our breakage
+  (our pins still protect CI). Treat a re-pushed tag or moved git tag as a potential
+  upstream compromise: check the project's advisories/commits before bumping anything, and
+  prefer waiting over fast-forwarding into an unexplained re-release.
 
 ## Renovate
 
@@ -65,7 +92,10 @@ scoped, justified suppression — never a disabled job.
 - **step-security/harden-runner**: egress audit mode on all CI jobs first; move to
   `egress-policy: block` per-job once the baselines are stable (CI egress is small and
   knowable: GitHub, GHCR, the Go module proxy, PyPI). Allow-list changes are reviewed like
-  code.
+  code. Note: the mutable-anchor watchdog (above) covers the *detection* half of this space
+  without adding a third-party dependency to every job; harden-runner would add runtime
+  *prevention* — they complement, not compete. Adopt with eyes open: it is itself one more
+  external action in the trust chain.
 
 ## Repo/settings posture (for completeness)
 

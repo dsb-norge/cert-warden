@@ -9,15 +9,19 @@ it.
 
 ## 1. The surface
 
-Five kinds of external dependency, four different mechanisms. There is nothing else — no
-lockfile, no package manifest, no vendored code.
+Six kinds of external dependency. The common principle: pin the thing that *executes*, not
+just the name it goes by — a tag or version string alone can be re-pointed upstream without
+any diff appearing here.
 
 | Surface | Lives in | Pinned as | Owner |
 |---|---|---|---|
 | Third-party actions | `.github/workflows/*.yml`, `**/action.yml` | full 40-char SHA + `# vX.Y.Z` comment | pinact / Renovate |
 | CI tool versions | the `env:` block of `ci.yml` | value under a `# renovate:` annotation | Renovate |
+| commitlint (npm) | root `package.json` + `package-lock.json` | exact versions + lockfile integrity hashes | Renovate |
+| bats-core | `BATS_CORE_REF` in the `env:` block of `ci.yml` | tag`@`commit-SHA, git-verified at install | Renovate |
+| bats helper libs | `tests/vendor/` | vendored copies ([tests/vendor/README.md](../tests/vendor/README.md)) | maintainer |
 | lego (consumer-facing) | `actions/setup-lego/action.yml` and `reusable-warden.yml` input defaults | value under a `# renovate:` annotation | Renovate + maintainer |
-| Harness images | `tests/harness/docker-compose*.yml` | exact tag | Renovate |
+| Harness images | `tests/harness/docker-compose*.yml` | exact tag `@sha256:` digest | Renovate |
 | Internal refs | `dsb-norge/cert-warden/...@vX.Y.Z` | tag + `# x-release-please-version` | **release-please only** |
 
 Two things follow from the table:
@@ -43,15 +47,13 @@ canary, not by pinning ([testing.md](testing.md) P-21).
 | `github-releases` | `gh api repos/<owner>/<repo>/releases/latest --jq .tag_name` |
 | docker images | `gh api repos/<owner>/<repo>/releases/latest --jq .tag_name` for the upstream project, then `docker compose … pull` |
 
-`releases/latest` has two traps this repo actually walks into, both in the action list:
+`releases/latest` has a trap this repo actually walks into:
 
 - **`github/codeql-action`** publishes `codeql-bundle-*` as its newest release. The tag you
   want is the `v4.x` action tag — `gh api repos/github/codeql-action/tags`.
-- **`wagoid/commitlint-github-action`** publishes no GitHub Releases at all, only tags, so
-  `releases/latest` 404s.
 
-Both are why step 3 uses pinact rather than a shell loop: pinact resolves the correct action
-tag in both cases.
+That is why step 3 uses pinact rather than a shell loop: pinact resolves the correct action
+tag.
 
 ## 3. Bumping
 
@@ -68,6 +70,11 @@ GITHUB_TOKEN="$(gh auth token)" pinact run      # pin anything newly added, with
 `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`. A version comment that disagrees with
 its SHA is worse than no comment — it is the thing a reader trusts.
 
+**commitlint (npm)** — bump in `package.json` (exact versions, no ranges) and regenerate the
+lockfile: `npm install --ignore-scripts && npm ci --ignore-scripts`. Never edit
+`package-lock.json` by hand; its integrity hashes are the actual pin. Renovate's npm manager
+does this automatically on its schedule.
+
 **Annotated tool versions** — edit only the *value*; leave the `# renovate:` line untouched.
 The annotation is what keeps Renovate able to bump it later, and `renovate.json`'s custom
 regex manager requires the annotation to sit on the line immediately above:
@@ -77,7 +84,10 @@ regex manager requires the annotation to sit on the line immediately above:
 ZIZMOR_VERSION: "1.29.0"
 ```
 
-**Harness images** — edit the tag in the compose file.
+**Harness images** — edit the tag in the compose file, then refresh the digest to match:
+`docker buildx imagetools inspect <image>:<tag>` prints the manifest-list digest. The digest
+is the real pin — registry tags are mutable, so a tag-only line can silently change what CI
+pulls; Renovate maintains the pair automatically (`pinDigests` rule in `renovate.json`).
 
 ## 4. Verification — run the gates *at the new versions*
 
@@ -90,7 +100,7 @@ normal `PATH`:
 ```bash
 GOBIN=/tmp/cw-tools go install mvdan.cc/sh/v3/cmd/shfmt@<new>
 GOBIN=/tmp/cw-tools go install github.com/rhysd/actionlint/cmd/actionlint@<new>
-python3 -m venv /tmp/cw-venv && /tmp/cw-venv/bin/pip install "yamllint==<new>" "zizmor==<new>"
+python3 -m venv /tmp/cw-venv && /tmp/cw-venv/bin/pip install --only-binary :all: "yamllint==<new>" "zizmor==<new>"
 export PATH="/tmp/cw-tools:$PATH"
 ```
 
@@ -122,6 +132,28 @@ What each bumped tool can newly break:
   the L2 suite; a CoreDNS or Pebble major can reject the existing config.
 - **lego** — see §5. The L2 suite is mandatory, not optional.
 
+### 4b. Hand-built dist bundles — rebuild and diff
+
+A node action executes its committed `dist/` bundle, not the `src/` you reviewed; upstreams
+without a dist-verification CI can ship a bundle that differs from source. Three actions in
+our list are in that category — at every bump of one of them, prove src == dist:
+
+```bash
+scripts/ci/verify-dist.sh googleapis/release-please-action <new-sha>  # gate: byte-identical or fail
+scripts/ci/verify-dist.sh Azure/login <new-sha>                       # review: read the printed diff
+scripts/ci/verify-dist.sh actions/create-github-app-token <new-sha>   # review: read the printed diff
+```
+
+azure/login is review-mode because its tags are known to ship *cosmetically* stale bundles
+(at v3.0.1: a stale user-agent marker + CRLF noise) — a hard gate would false-fail forever.
+Anything in the printed diff beyond that pattern is a stop-and-investigate signal.
+create-github-app-token is review-mode until byte-reproducibility is established; it deserves
+the strictest reading of the three — it is the only action handling a persistent credential
+(the release App private key).
+
+lego needs no equivalent: the Go module proxy + sum.golang.org transparency log already
+guarantee the consumed artifact matches the tag (§5 covers the human checks).
+
 ## 5. lego bumps specifically
 
 lego is the only dependency whose version reaches consumers, so it gets extra care.
@@ -138,6 +170,12 @@ lego is the only dependency whose version reaches consumers, so it gets extra ca
 - **Refresh version anchors in comments.** `cert-warden.sh` documents lego behaviour against a
   named version ("lego vX.Y.Z has no `--dynamic` flag"). If you re-verified the claim, update
   the version it names; if you didn't, don't.
+- **Run govulncheck against the new binary and read the delta** —
+  `govulncheck -mode=binary "$(command -v lego)"`. The weekly canary runs this warn-only
+  (lego links every DNS provider into the binary, so symbol-presence findings routinely
+  include code the azuredns path never calls); at a bump, *you* are the reachability
+  assessment. A finding in lego core, the ACME paths, or the azure-sdk chain blocks the
+  bump; a finding in some other provider's SDK is bump-with-next-release material.
 
 ## 6. Commit typing decides whether consumers get a release
 

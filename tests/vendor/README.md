@@ -21,6 +21,9 @@ Only `load.bash`, `src/` and `LICENSE` are vendored (both libraries are CC0 1.0)
 docs and self-tests are omitted. `bats-file` is not vendored because no suite loads it.
 
 **Re-vendoring** (rarely needed — upstream is dormant): pick the new tag, resolve its commit
-(`gh api repos/bats-core/<lib>/commits/<tag> --jq .sha`), download the tarball **by that
-commit SHA**, copy `load.bash` + `src/` + `LICENSE` over the directory here, update the table
-above, and read the diff — the diff review is the supply-chain control.
+(`gh api repos/bats-core/<lib>/commits/<tag> --jq .sha`), then fetch **over the git protocol
+at that commit** (`git init && git fetch --depth 1 <url> <sha> && git checkout <sha>`) — git
+verifies the object hashes, which a tarball download does not. Copy `load.bash` + `src/` +
+`LICENSE` over the directory here, update the table above, and read the diff — the diff
+review is the supply-chain control. (Verification of the current copies: `diff -r` against
+such a fetch-by-commit clone came back byte-identical, 2026-08-14.)

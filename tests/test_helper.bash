@@ -3,16 +3,17 @@
 # Shared bats test helper. Loaded by every suite via `load ../test_helper`.
 #
 # Library resolution: bats-support/bats-assert are VENDORED in tests/vendor (see its README
-# for the supply-chain rationale) — no setup needed locally or in CI. Caller-supplied
-# BATS_LIB_PATH entries keep priority; /usr/lib and ~/tools/bats-libs remain as fallbacks.
+# for the supply-chain rationale) — no setup needed locally or in CI.
 
 # Repo root (tests/ is one level below).
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 export REPO_ROOT
 
-# bats >=1.14 pre-seeds BATS_LIB_PATH (/usr/lib/bats), so a `:-` default would never fire and
-# the appends below would be dead behind it. Append instead: caller entries keep priority.
-export BATS_LIB_PATH="${BATS_LIB_PATH:+${BATS_LIB_PATH}:}${REPO_ROOT}/tests/vendor:/usr/lib:${HOME}/tools/bats-libs"
+# The vendored path goes FIRST, deliberately ahead of whatever is already in BATS_LIB_PATH:
+# bats >=1.14 pre-seeds BATS_LIB_PATH=/usr/lib/bats, so appending would let a system copy of
+# the helper libs silently shadow the reviewed vendored ones. Determinism is the point of
+# vendoring — the committed copy must be the one that loads, everywhere.
+export BATS_LIB_PATH="${REPO_ROOT}/tests/vendor${BATS_LIB_PATH:+:${BATS_LIB_PATH}}:/usr/lib:${HOME}/tools/bats-libs"
 
 bats_load_library bats-support
 bats_load_library bats-assert

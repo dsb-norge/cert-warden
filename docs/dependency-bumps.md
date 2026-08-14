@@ -132,6 +132,28 @@ What each bumped tool can newly break:
   the L2 suite; a CoreDNS or Pebble major can reject the existing config.
 - **lego** — see §5. The L2 suite is mandatory, not optional.
 
+### 4b. Hand-built dist bundles — rebuild and diff
+
+A node action executes its committed `dist/` bundle, not the `src/` you reviewed; upstreams
+without a dist-verification CI can ship a bundle that differs from source. Three actions in
+our list are in that category — at every bump of one of them, prove src == dist:
+
+```bash
+scripts/ci/verify-dist.sh googleapis/release-please-action <new-sha>  # gate: byte-identical or fail
+scripts/ci/verify-dist.sh Azure/login <new-sha>                       # review: read the printed diff
+scripts/ci/verify-dist.sh actions/create-github-app-token <new-sha>   # review: read the printed diff
+```
+
+azure/login is review-mode because its tags are known to ship *cosmetically* stale bundles
+(at v3.0.1: a stale user-agent marker + CRLF noise) — a hard gate would false-fail forever.
+Anything in the printed diff beyond that pattern is a stop-and-investigate signal.
+create-github-app-token is review-mode until byte-reproducibility is established; it deserves
+the strictest reading of the three — it is the only action handling a persistent credential
+(the release App private key).
+
+lego needs no equivalent: the Go module proxy + sum.golang.org transparency log already
+guarantee the consumed artifact matches the tag (§5 covers the human checks).
+
 ## 5. lego bumps specifically
 
 lego is the only dependency whose version reaches consumers, so it gets extra care.

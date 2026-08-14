@@ -213,14 +213,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0 # commitlint needs history to lint the commit range
+          fetch-depth: 0 # lint-commits.mjs reads the commit range from git history
 
+      # Lockfile-pinned commitlint instead of wagoid/commitlint-github-action: that action's
+      # SHA pin pulled a MUTABLE Docker Hub tag at runtime — the pin froze the wrapper, not
+      # the executed code. npm ci verifies every package against the committed lockfile's
+      # integrity hashes; --ignore-scripts blocks install hooks. Same @commitlint libraries,
+      # same `results` output shape (docs/security-tooling.md §commitlint).
       - name: Lint commits
         id: commitlint
         continue-on-error: true # the job fails at the end; first we build the explainer
-        uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed # v6.2.1
-        with:
-          configFile: .commitlintrc.yml
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.after }}
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund --silent
+          node scripts/ci/lint-commits.mjs "${BASE_SHA}" "${HEAD_SHA}"
 
       - name: Compose explainer comment
         id: compose

@@ -9,13 +9,15 @@ it.
 
 ## 1. The surface
 
-Five kinds of external dependency, four different mechanisms. There is nothing else — no
-lockfile, no package manifest, no vendored code.
+Six kinds of external dependency. The common principle: pin the thing that *executes*, not
+just the name it goes by — a tag or version string alone can be re-pointed upstream without
+any diff appearing here.
 
 | Surface | Lives in | Pinned as | Owner |
 |---|---|---|---|
 | Third-party actions | `.github/workflows/*.yml`, `**/action.yml` | full 40-char SHA + `# vX.Y.Z` comment | pinact / Renovate |
 | CI tool versions | the `env:` block of `ci.yml` | value under a `# renovate:` annotation | Renovate |
+| commitlint (npm) | root `package.json` + `package-lock.json` | exact versions + lockfile integrity hashes | Renovate |
 | lego (consumer-facing) | `actions/setup-lego/action.yml` and `reusable-warden.yml` input defaults | value under a `# renovate:` annotation | Renovate + maintainer |
 | Harness images | `tests/harness/docker-compose*.yml` | exact tag `@sha256:` digest | Renovate |
 | Internal refs | `dsb-norge/cert-warden/...@vX.Y.Z` | tag + `# x-release-please-version` | **release-please only** |
@@ -43,15 +45,13 @@ canary, not by pinning ([testing.md](testing.md) P-21).
 | `github-releases` | `gh api repos/<owner>/<repo>/releases/latest --jq .tag_name` |
 | docker images | `gh api repos/<owner>/<repo>/releases/latest --jq .tag_name` for the upstream project, then `docker compose … pull` |
 
-`releases/latest` has two traps this repo actually walks into, both in the action list:
+`releases/latest` has a trap this repo actually walks into:
 
 - **`github/codeql-action`** publishes `codeql-bundle-*` as its newest release. The tag you
   want is the `v4.x` action tag — `gh api repos/github/codeql-action/tags`.
-- **`wagoid/commitlint-github-action`** publishes no GitHub Releases at all, only tags, so
-  `releases/latest` 404s.
 
-Both are why step 3 uses pinact rather than a shell loop: pinact resolves the correct action
-tag in both cases.
+That is why step 3 uses pinact rather than a shell loop: pinact resolves the correct action
+tag.
 
 ## 3. Bumping
 
@@ -67,6 +67,11 @@ GITHUB_TOKEN="$(gh auth token)" pinact run      # pin anything newly added, with
 **Never hand-type a SHA.** If you must resolve one yourself:
 `gh api repos/<owner>/<repo>/commits/<tag> --jq .sha`. A version comment that disagrees with
 its SHA is worse than no comment — it is the thing a reader trusts.
+
+**commitlint (npm)** — bump in `package.json` (exact versions, no ranges) and regenerate the
+lockfile: `npm install --ignore-scripts && npm ci --ignore-scripts`. Never edit
+`package-lock.json` by hand; its integrity hashes are the actual pin. Renovate's npm manager
+does this automatically on its schedule.
 
 **Annotated tool versions** — edit only the *value*; leave the `# renovate:` line untouched.
 The annotation is what keeps Renovate able to bump it later, and `renovate.json`'s custom

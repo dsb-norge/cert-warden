@@ -6,7 +6,7 @@
     ":prConcurrentLimit10",
     "helpers:pinGitHubActionDigests"
   ],
-  "enabledManagers": ["github-actions", "docker-compose", "custom.regex"],
+  "enabledManagers": ["github-actions", "docker-compose", "npm", "custom.regex"],
   "ignoreDeps": ["dsb-norge/cert-warden"],
   "labels": ["dependencies"],
   "prHourlyLimit": 4,

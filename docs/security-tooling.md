@@ -47,7 +47,15 @@ scoped, justified suppression — never a disabled job.
 - **What/why**: conventional commits drive release-please (versions + public changelog); this
   repo merges with merge commits, so every commit must parse. Failures post a sticky PR
   comment with per-commit reasons and the reword recipe.
-- **Local prevention**: `scripts/install-git-hooks.sh`.
+- **How**: `scripts/ci/lint-commits.mjs` + the root `package.json`/`package-lock.json`
+  (`npm ci --ignore-scripts` — the lockfile's integrity hashes pin the whole dependency
+  tree; `--ignore-scripts` blocks npm install hooks). It deliberately replaced
+  `wagoid/commitlint-github-action`: that action's `action.yml` pulled a **mutable** Docker
+  Hub tag at runtime, so our SHA pin froze the wrapper but not the executed code — the one
+  thing a pin is for. The script uses the same `@commitlint/*` libraries the action wrapped
+  and emits the same per-commit `results` output.
+- **Local prevention**: `scripts/install-git-hooks.sh` (the hook runs the same lockfile-pinned
+  install).
 
 ## Renovate
 

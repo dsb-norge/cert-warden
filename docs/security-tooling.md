@@ -92,7 +92,10 @@ scoped, justified suppression — never a disabled job.
 - **step-security/harden-runner**: egress audit mode on all CI jobs first; move to
   `egress-policy: block` per-job once the baselines are stable (CI egress is small and
   knowable: GitHub, GHCR, the Go module proxy, PyPI). Allow-list changes are reviewed like
-  code.
+  code. Note: the mutable-anchor watchdog (above) covers the *detection* half of this space
+  without adding a third-party dependency to every job; harden-runner would add runtime
+  *prevention* — they complement, not compete. Adopt with eyes open: it is itself one more
+  external action in the trust chain.
 
 ## Repo/settings posture (for completeness)
 

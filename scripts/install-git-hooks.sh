@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Install the local commit-msg hook so conventional-commit problems are caught at commit time
-# instead of by CI. Requires npx (Node.js); the hook runs commitlint with the repo config.
+# instead of by CI. Requires npm (Node.js); the hook runs the repo's lockfile-pinned
+# commitlint (root package.json) with the repo config.
 #
 set -euo pipefail
 shopt -s inherit_errexit

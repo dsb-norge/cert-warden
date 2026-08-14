@@ -5,6 +5,8 @@ name: CI
 #                private-reference guard (this file, always fast)
 #   L1 unit    — bats suites (added with the scripts)
 #   L2/L3      — integration harness and workflow self-tests (added with the harness/actions)
+#   weekly     — drift canary (all of the above on a schedule) + mutable-anchor watchdog
+#                (docs/security-tooling.md)
 #
 # A single aggregated job, `ci-conclusion`, is the only check branch protection requires —
 # extend its `needs` list when adding jobs.

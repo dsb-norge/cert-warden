@@ -1,5 +1,10 @@
 extends: default
 
+# node_modules exists locally after `npm ci` (commitlint tooling; gitignored, absent in the
+# CI lint job's fresh checkout) — keep the local `yamllint --strict .` gate green anyway.
+ignore: |
+  node_modules/
+
 rules:
   # GitHub workflow files routinely exceed 80 chars (expressions, URLs in comments).
   line-length:

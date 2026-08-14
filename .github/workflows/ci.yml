@@ -317,6 +317,35 @@ jobs:
           echo "::error::One or more commit messages are not valid conventional commits (see the sticky PR comment)."
           exit 1
 
+  drift-watchdog:
+    name: "mutable-anchor watchdog"
+    # Class-level mitigation for what SHA/digest pins cannot see: an upstream re-pointing
+    # the NAME we pinned from (re-pushed registry tag, moved git tag, wheel added to an old
+    # PyPI release). Weekly + dispatch; on PRs only when the watchdog itself changes.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check mutable anchors
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [[ "${EVENT}" == "pull_request" ]]; then
+            gh api "repos/${REPO}/pulls/${PR}/files" --paginate --jq '.[].filename' |
+              grep -qE '^(scripts/ci/check-mutable-anchors\.sh|\.github/mutable-anchors\.json)$' || {
+              echo "watchdog untouched — skipping on PR (runs weekly + on dispatch)"
+              exit 0
+            }
+          fi
+          bash scripts/ci/check-mutable-anchors.sh
+
   private-ref-guard:
     name: "private-reference guard"
     runs-on: ubuntu-latest
@@ -510,6 +539,7 @@ jobs:
       - security-zizmor
       - pin-check
       - commitlint
+      - drift-watchdog
       - private-ref-guard
       - unit-tests
       - integration-tests

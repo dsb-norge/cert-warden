@@ -170,6 +170,12 @@ lego is the only dependency whose version reaches consumers, so it gets extra ca
 - **Refresh version anchors in comments.** `cert-warden.sh` documents lego behaviour against a
   named version ("lego vX.Y.Z has no `--dynamic` flag"). If you re-verified the claim, update
   the version it names; if you didn't, don't.
+- **Run govulncheck against the new binary and read the delta** —
+  `govulncheck -mode=binary "$(command -v lego)"`. The weekly canary runs this warn-only
+  (lego links every DNS provider into the binary, so symbol-presence findings routinely
+  include code the azuredns path never calls); at a bump, *you* are the reachability
+  assessment. A finding in lego core, the ACME paths, or the azure-sdk chain blocks the
+  bump; a finding in some other provider's SDK is bump-with-next-release material.
 
 ## 6. Commit typing decides whether consumers get a release
 

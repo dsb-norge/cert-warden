@@ -42,6 +42,8 @@ env:
   BATS_CORE_REF: "v1.14.0@eb7f42f8d608ac693d7a4b67474f6714ea68cfc5"
   # renovate: datasource=rubygems depName=bashcov
   BASHCOV_VERSION: "3.3.0"
+  # renovate: datasource=go depName=golang.org/x/vuln
+  GOVULNCHECK_VERSION: "v1.7.0"
 
 # Default-deny; each job grants only what it needs.
 permissions: {}
@@ -363,6 +365,41 @@ jobs:
             }
           fi
           bash scripts/ci/check-mutable-anchors.sh
+
+      # Weekly advisory re-check of the production client binary: pins freeze versions,
+      # advisories move. WARN-ONLY by design — lego links all ~150 DNS providers into one
+      # binary, so symbol-presence findings routinely include code the azuredns path never
+      # calls (the 2026-08 transitive audit traced the current findings to gRPC client paths
+      # only gcloud/yandex providers use). A new finding is a signal to read, not an
+      # automatic red; reachability assessment belongs to a human (dependency-bumps.md §5).
+      - name: Setup lego (pinned, same path consumers use)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: ./actions/setup-lego
+
+      - name: Install govulncheck (cached)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: ./.github/actions/setup-go-tool
+        with:
+          module: golang.org/x/vuln/cmd/govulncheck
+          version: ${{ env.GOVULNCHECK_VERSION }}
+          binary: govulncheck
+
+      - name: govulncheck the lego binary (warn-only)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          rc=0
+          out="$(govulncheck -mode=binary "$(command -v lego)" 2>&1)" || rc=$?
+          echo "${out}"
+          {
+            echo "### govulncheck (lego binary, weekly advisory re-check — warn-only)"
+            echo '```'
+            echo "${out}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+          if ((rc != 0)); then
+            echo "::warning::govulncheck reports findings in the lego binary — read the job summary;" \
+              "assess reachability for the azuredns path before acting."
+          fi
 
   private-ref-guard:
     name: "private-reference guard"

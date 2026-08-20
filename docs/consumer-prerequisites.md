@@ -9,7 +9,7 @@ What your Azure landing zone must provide before calling the suite. Everything h
 |---|---|---|
 | Public DNS zones in one resource group | warden | The zones to maintain certificates for |
 | A Key Vault (RBAC mode) | warden, sweeper | Stores certs, LE account material, ARI metadata |
-| A **cert-maintainer** user-assigned identity + federated credential | warden, sweeper | OIDC login from your caller workflow |
+| A **cert-maintainer** user-assigned identity + federated credentials (both subject formats) | warden, sweeper | OIDC login from your caller workflow |
 | A self-hosted runner with a network path to the Key Vault | warden, sweeper | The KV is typically private-endpoint-only |
 | (optional) A **monitor** identity with `Notifications.Send` on your Teams Notification Bot | monitor | Bot delivery |
 | (optional) A certificate consumer (e.g. Application Gateway) reading the versionless secret id | — | Auto-rotation |
@@ -26,6 +26,10 @@ resource "azurerm_user_assigned_identity" "cert_maintainer" {
 # OIDC from GitHub Actions. main-only by design: schedules and workflow_run chains execute on
 # the default branch, and a branch-scoped subject prevents dispatching cert operations from
 # arbitrary branches (a branch dispatch fails AADSTS700213 — expected, not a bug).
+#
+# Two credentials per repo, one per GitHub subject-claim format (see
+# "GitHub OIDC subject formats" below). A federated credential matches its subject exactly,
+# and managed identities do not support flexible credentials, so both are needed.
 resource "azurerm_federated_identity_credential" "cert_maintainer_github" {
   name                = "github-main"
   resource_group_name = azurerm_resource_group.certs.name
@@ -33,6 +37,17 @@ resource "azurerm_federated_identity_credential" "cert_maintainer_github" {
   audience            = ["api://AzureADTokenExchange"]
   issuer              = "https://token.actions.githubusercontent.com"
   subject             = "repo:<your-org>/<your-repo>:ref:refs/heads/main"
+}
+
+# Immutable-format twin: <org-id> and <repo-id> are the permanent numeric IDs — see below
+# for how to look them up.
+resource "azurerm_federated_identity_credential" "cert_maintainer_github_immutable" {
+  name                = "github-main-immutable"
+  resource_group_name = azurerm_resource_group.certs.name
+  parent_id           = azurerm_user_assigned_identity.cert_maintainer.id
+  audience            = ["api://AzureADTokenExchange"]
+  issuer              = "https://token.actions.githubusercontent.com"
+  subject             = "repo:<your-org>@<org-id>/<your-repo>@<repo-id>:ref:refs/heads/main"
 }
 
 # Key Vault (RBAC mode): the maintainer imports certificates and reads/writes secrets.
@@ -74,6 +89,33 @@ resource "azurerm_role_assignment" "dns_txt" {
 
 The warden also calls `az network dns record-set list` and `az network dns zone list` — the
 reads above cover it (`recordsets/read` spans record types).
+
+### GitHub OIDC subject formats
+
+Since **2026-07-15** GitHub issues two subject-claim formats for Actions OIDC tokens
+([changelog](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/),
+[reference](https://docs.github.com/en/actions/reference/security/oidc)):
+
+- **Classic** — `repo:<your-org>/<your-repo>:ref:refs/heads/main` — issued by repos created
+  before 2026-07-15.
+- **Immutable** — `repo:<your-org>@<org-id>/<your-repo>@<repo-id>:ref:refs/heads/main` —
+  issued by repos created, **renamed or transferred** after 2026-07-15, and by repos that
+  opt in.
+
+A (non-flexible) federated credential matches its subject **exactly**, and managed identities
+do not support flexible credentials (claims-matching expressions exist for app registrations
+only) — so create **both** credentials, as in the example above. A classic-only credential
+silently stops matching the moment its repo starts issuing immutable subjects; for repos
+created after 2026-07-15 it never matches at all, so new caller repos need the
+immutable-format credential specifically. The extra credential is harmless when unused.
+
+The numeric IDs are permanent and never reused (that is the point of the format — they
+survive renames and transfers). Look them up with:
+
+```sh
+gh api /orgs/<your-org> --jq .id            # <org-id>
+gh api /repos/<your-org>/<your-repo> --jq .id   # <repo-id>
+```
 
 ## Key Vault expectations
 
@@ -118,7 +160,8 @@ reads above cover it (`recordsets/read` spans record types).
 ## Bot delivery (optional)
 
 A deployed [Teams Notification Bot](https://github.com/dsb-norge/teams-notifier-function-app),
-an alias for your channel, and a monitor identity: a UAMI with a federated credential (same
-`main`-only subject pattern) holding the bot API app's `Notifications.Send` app role. The
-monitor identity needs **no subscription RBAC** (the reusable workflow logs in with
-`allow-no-subscriptions`).
+an alias for your channel, and a monitor identity: a UAMI with federated credentials (same
+`main`-only subject pattern, both formats — see
+[GitHub OIDC subject formats](#github-oidc-subject-formats)) holding the bot API app's
+`Notifications.Send` app role. The monitor identity needs **no subscription RBAC** (the
+reusable workflow logs in with `allow-no-subscriptions`).

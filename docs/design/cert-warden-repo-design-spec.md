@@ -393,7 +393,10 @@ gets dropped (D-21).
 ### 7.3 `consumer-prerequisites.md` — requirements with example declarations, zero private links
 
 Content: the UAMI + RBAC set (KV Certificates/Secrets Officer, the custom DNS TXT role),
-federated credential (subject `repo:<org>/<repo>:ref:refs/heads/main` — and why `main`-only),
+federated credentials (one per GitHub OIDC subject format: classic
+`repo:<org>/<repo>:ref:refs/heads/main` and immutable
+`repo:<org>@<org-id>/<repo>@<repo-id>:ref:refs/heads/main`, both needed because UAMIs lack
+flexible credentials — and why `main`-only),
 KV expectations (RBAC mode, network path from the runner), runner requirements, LE account
 email policy, LE staging-first onboarding sequence, and production rate-limit planning notes.
 

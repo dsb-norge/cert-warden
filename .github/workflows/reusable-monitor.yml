@@ -39,10 +39,12 @@ on:
         required: false
         default: ""
       warn-threshold:
-        description: "min_lifetime_fraction WARNING level."
+        description: >-
+          min_lifetime_fraction WARNING level. Must stay below the ~0.333 ARI renewal point, or
+          every certificate warns while waiting for its due renewal — see monitor.sh.
         type: string
         required: false
-        default: "0.40"
+        default: "0.30"
       page-threshold:
         description: "min_lifetime_fraction CRITICAL level."
         type: string

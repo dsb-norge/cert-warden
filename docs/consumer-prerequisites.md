@@ -155,7 +155,10 @@ gh api /repos/<your-org>/<your-repo> --jq .id   # <repo-id>
   exempt from most limits, and the warden renews well ahead of expiry, so steady-state usage
   is minimal — the limit matters for first onboarding and forced reissues.
 - Alerting thresholds are lifetime-relative (`min_lifetime_fraction`), so shorter LE
-  lifetimes need no re-tuning.
+  lifetimes need no re-tuning. ARI renews at ~1/3 remaining lifetime, so the defaults sit
+  below that point (warn `0.30`, page `0.15`) and read as "renewal is overdue by". If you
+  override them, keep them under `0.333` — a higher warn level fires on every certificate
+  during the normal wait between renewal becoming due and the next warden run.
 
 ## Bot delivery (optional)
 

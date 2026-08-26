@@ -41,10 +41,22 @@ healthy_record() {
 
 @test "min lifetime fraction below warn threshold -> WARNING" {
   write_metrics_fixture "${METRICS}" \
-    '{"zone":"c.example.test","action":"none","kv_cert_name":"le-cert-production-c-pfx","lifetime_fraction_remaining":0.30,"days_to_expiry":27,"error":""}'
+    '{"zone":"c.example.test","action":"none","kv_cert_name":"le-cert-production-c-pfx","lifetime_fraction_remaining":0.25,"days_to_expiry":22,"error":""}'
   run bash "${MONITOR_SH}"
   assert_success
   assert_output --partial "severity=WARNING"
+}
+
+@test "cert awaiting its due ARI renewal stays OK (regression: warn threshold above the renewal point)" {
+  # ARI suggests renewal at ~1/3 remaining lifetime and the CA may place the window somewhat
+  # later, so a healthy cert legitimately sits just above 0.333 until the next warden run
+  # renews it. The default warn level must leave room for that: field values in this band
+  # (~0.39 observed) alerted on every run under the old 0.40 default, with nothing wrong.
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"ari.example.test","action":"none","kv_cert_name":"le-cert-production-ari-pfx","lifetime_fraction_remaining":0.31,"days_to_expiry":28,"error":""}'
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=OK"
 }
 
 @test "failed zone with healthy lifetime -> WARNING (never pages on a single failure)" {
@@ -135,7 +147,7 @@ healthy_record() {
 
 @test "evaluate-only mode (no bot config) emits no error annotation (review F9)" {
   write_metrics_fixture "${METRICS}" \
-    '{"zone":"c.example.test","action":"none","kv_cert_name":"le-cert-production-c-pfx","lifetime_fraction_remaining":0.30,"days_to_expiry":27,"error":""}'
+    '{"zone":"c.example.test","action":"none","kv_cert_name":"le-cert-production-c-pfx","lifetime_fraction_remaining":0.25,"days_to_expiry":22,"error":""}'
   export DRY_RUN="false" # bot config entirely absent -> evaluate-only, not a delivery attempt
   run bash "${MONITOR_SH}"
   assert_success
@@ -188,7 +200,7 @@ healthy_record() {
 
 @test "PARTIAL bot configuration is an error annotation (misconfig), still exit 0" {
   write_metrics_fixture "${METRICS}" \
-    '{"zone":"c.example.test","action":"none","kv_cert_name":"le-cert-production-c-pfx","lifetime_fraction_remaining":0.30,"days_to_expiry":27,"error":""}'
+    '{"zone":"c.example.test","action":"none","kv_cert_name":"le-cert-production-c-pfx","lifetime_fraction_remaining":0.25,"days_to_expiry":22,"error":""}'
   export DRY_RUN="false" BOT_API_BASE="https://bot.invalid/api" # audience + alias missing
   run bash "${MONITOR_SH}"
   assert_success

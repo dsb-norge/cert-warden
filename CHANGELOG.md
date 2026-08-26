@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.3](https://github.com/dsb-norge/cert-warden/compare/v1.0.2...v1.0.3) (2026-08-26)
+
+
+### Bug Fixes
+
+* **monitor:** default warn threshold below the ARI renewal point ([3ba1edc](https://github.com/dsb-norge/cert-warden/commit/3ba1edcf5f31461c091d1100c23fba344561455c))
+* **monitor:** default warn threshold below the ARI renewal point ([#24](https://github.com/dsb-norge/cert-warden/issues/24)) ([f07d911](https://github.com/dsb-norge/cert-warden/commit/f07d911f74eb571837c9c2c6ff9940b531cf852a))
+
 ## [1.0.2](https://github.com/dsb-norge/cert-warden/compare/v1.0.1...v1.0.2) (2026-08-13)
 
 

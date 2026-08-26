@@ -11,13 +11,25 @@
 #  normal and self-heals. The signal is lifetime-relative, so the same thresholds work for
 #  90-day or 6-day certs and never fire on transient blips.
 #
+#  Threshold placement — both defaults MUST sit below the renewal point, not above it. ARI
+#  (RFC 9773) suggests renewal about two thirds of the way through a certificate's lifetime,
+#  i.e. at a remaining fraction of ~0.333 (30 days on a 90-day cert); lego's fallback when ARI
+#  is unreachable (`--renew-days 30`) lands on the same point. That ratio is what makes the
+#  fraction model duration-independent. A threshold above 0.333 therefore alerts on healthy
+#  steady state: every certificate crosses it days before renewal is even permitted, and stays
+#  there until the next scheduled warden run renews it. Read the defaults as "renewal is
+#  overdue by": WARN 0.30 ~= 3 days (~6 twice-daily runs) past due, PAGE 0.15 ~= 2.5 weeks
+#  past due with expiry closing in. The gap below 0.333 is deliberate margin — the ARI window
+#  is a span the CA chooses and may shift, so renewal can legitimately land a little later
+#  than the nominal point.
+#
 #  Inputs (environment variables):
 #    METRICS_FILE             Path to the downloaded metrics JSON. May be missing/empty.
 #    BOT_API_BASE             e.g. https://func-iap-teams-notifier.azurewebsites.net/api
 #    BOT_API_AUDIENCE         Token audience, e.g. api://4ae764cb-...
 #    BOT_ALIAS                Notify alias, e.g. from-test-env
 #    ENV_NAME                 Azure env (test/dev/prod) — for labelling
-#    WARN_THRESHOLD           min_lifetime_fraction warn level (default 0.40)
+#    WARN_THRESHOLD           min_lifetime_fraction warn level (default 0.30)
 #    PAGE_THRESHOLD           min_lifetime_fraction page level (default 0.15)
 #    CERT_WARDEN_CONCLUSION   Triggering Cert Warden run conclusion (success/failure/"")
 #    CERT_WARDEN_RUN_URL      Link to the triggering run (optional)
@@ -46,7 +58,7 @@ fi
 
 # region: setup ---------------------------------------------------------------------------------
 
-WARN_THRESHOLD="${WARN_THRESHOLD:-0.40}"
+WARN_THRESHOLD="${WARN_THRESHOLD:-0.30}"
 PAGE_THRESHOLD="${PAGE_THRESHOLD:-0.15}"
 LIVENESS_WINDOW_HOURS="${LIVENESS_WINDOW_HOURS:-36}"
 FORCE_NOTIFY="${FORCE_NOTIFY:-false}"

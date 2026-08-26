@@ -29,7 +29,7 @@ them as-is.
 
 ### monitor (`actions/monitor/monitor.sh`)
 
-`METRICS_FILE`, `ENV_NAME`, `WARN_THRESHOLD` (0.40), `PAGE_THRESHOLD` (0.15),
+`METRICS_FILE`, `ENV_NAME`, `WARN_THRESHOLD` (0.30), `PAGE_THRESHOLD` (0.15),
 `LIVENESS_WINDOW_HOURS` (36), `CERT_WARDEN_CONCLUSION`, `CERT_WARDEN_RUN_URL`,
 `METRICS_AGE_HOURS`, `BOT_API_BASE`, `BOT_API_AUDIENCE`, `BOT_ALIAS`, `FORCE_NOTIFY`,
 `DRY_RUN`. All optional; without the bot triple the monitor is evaluate-only. Exit code is

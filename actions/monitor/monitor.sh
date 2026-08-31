@@ -23,6 +23,16 @@
 #  is a span the CA chooses and may shift, so renewal can legitimately land a little later
 #  than the nominal point.
 #
+#  Unevaluated is neither healthy nor an alert. When the caller cannot work out WHICH warden
+#  run to look at (RESOLVE_FAILED — a GitHub API blip on the runner), nothing has been
+#  measured: severity is UNKNOWN, the measurement outputs are empty, and the monitor stays
+#  SILENT. Reporting that as a breach is worse than useless — the card reads "0 managed certs,
+#  min_lifetime_fraction null", which is indistinguishable from a real outage and trains the
+#  on-call to ignore the channel. Detection of a *persistent* resolve outage is deliberately
+#  left to the ::warning:: annotation on the run and to Key Vault's own near-expiry alerting;
+#  the after-every-warden-run evaluation (workflow_run) never takes this path at all, since it
+#  gets the run id from the event payload.
+#
 #  Inputs (environment variables):
 #    METRICS_FILE             Path to the downloaded metrics JSON. May be missing/empty.
 #    BOT_API_BASE             e.g. https://func-iap-teams-notifier.azurewebsites.net/api
@@ -34,6 +44,8 @@
 #    CERT_WARDEN_CONCLUSION   Triggering Cert Warden run conclusion (success/failure/"")
 #    CERT_WARDEN_RUN_URL      Link to the triggering run (optional)
 #    METRICS_AGE_HOURS        Age of the metrics (hours) for the liveness check (optional)
+#    RESOLVE_FAILED           "true" when the caller could not resolve the warden run at all
+#                             (GitHub API unreachable) => severity UNKNOWN, never notifies
 #    LIVENESS_WINDOW_HOURS    Max tolerated metrics age before alerting (default 36)
 #    FORCE_NOTIFY             "true" to post even when status is OK (manual test)
 #    DRY_RUN                  "true" to evaluate + log but never POST
@@ -62,6 +74,7 @@ WARN_THRESHOLD="${WARN_THRESHOLD:-0.30}"
 PAGE_THRESHOLD="${PAGE_THRESHOLD:-0.15}"
 LIVENESS_WINDOW_HOURS="${LIVENESS_WINDOW_HOURS:-36}"
 FORCE_NOTIFY="${FORCE_NOTIFY:-false}"
+RESOLVE_FAILED="${RESOLVE_FAILED:-false}"
 DRY_RUN="${DRY_RUN:-false}"
 ENV_NAME="${ENV_NAME:-unknown}"
 # Bot delivery config — defaulted so a DRY_RUN can be exercised without it; the workflow always
@@ -88,7 +101,11 @@ failedZones=""
 
 # jq empty: a truncated/corrupt artifact (e.g. the warden died mid-write) must degrade to the
 # absent-metrics path — the monitor NEVER fails the workflow (its core contract).
-if [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]] && jq empty "${METRICS_FILE}" 2>/dev/null; then
+if [[ "${RESOLVE_FAILED}" == "true" ]]; then
+  # No run resolved => no artifact to read and nothing measured. Deliberately NOT the
+  # absent-metrics branch below: that one reports managed=0 as a finding about certificates.
+  echo "${_action_name}: warden run could not be resolved — nothing was evaluated."
+elif [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]] && jq empty "${METRICS_FILE}" 2>/dev/null; then
   start-group "metrics evaluation"
 
   managedCount=$(jq '[.[] | select((.kv_cert_name // "") != "" and .action != "not_delegated")] | length' "${METRICS_FILE}")
@@ -116,55 +133,77 @@ fi
 # region: decide severity -----------------------------------------------------------------------
 # Severity precedence: CRITICAL > WARNING > OK. Layer A (lifetime symptom) is the primary,
 # paging signal. Layer C (run failure / no metrics / staleness) is informational and only warns
-# — a single red run self-heals on the next renewal attempt.
+# — a single red run self-heals on the next renewal attempt. UNKNOWN sits outside that ladder:
+# it means "not measured", so it never competes with the others and never notifies.
 severity="OK"
 declare -a reasons=()
 
-# Layer A — managed-cert lifetime SLO (lifetime-relative, scales to any cert duration).
-if [[ "${minLifetimeFraction}" != "null" ]]; then
-  if awk "BEGIN { exit !(${minLifetimeFraction} < ${PAGE_THRESHOLD}) }"; then
-    severity="CRITICAL"
-    reasons+=("min_lifetime_fraction ${minLifetimeFraction} < page threshold ${PAGE_THRESHOLD} (worst: ${worstZone}, ~${worstDays}d left)")
-  elif awk "BEGIN { exit !(${minLifetimeFraction} < ${WARN_THRESHOLD}) }"; then
-    severity="WARNING"
-    reasons+=("min_lifetime_fraction ${minLifetimeFraction} < warn threshold ${WARN_THRESHOLD} (worst: ${worstZone}, ~${worstDays}d left)")
+if [[ "${RESOLVE_FAILED}" == "true" ]]; then
+  # UNKNOWN short-circuits the whole matrix: every check below would be reading the zeroes the
+  # evaluate region never filled in, and would report them as facts about the certificates.
+  severity="UNKNOWN"
+  reasons+=("could not resolve which Cert Warden run to evaluate (GitHub API unreachable after retries) — certificate health was NOT checked")
+else
+  # Layer A — managed-cert lifetime SLO (lifetime-relative, scales to any cert duration).
+  if [[ "${minLifetimeFraction}" != "null" ]]; then
+    if awk "BEGIN { exit !(${minLifetimeFraction} < ${PAGE_THRESHOLD}) }"; then
+      severity="CRITICAL"
+      reasons+=("min_lifetime_fraction ${minLifetimeFraction} < page threshold ${PAGE_THRESHOLD} (worst: ${worstZone}, ~${worstDays}d left)")
+    elif awk "BEGIN { exit !(${minLifetimeFraction} < ${WARN_THRESHOLD}) }"; then
+      severity="WARNING"
+      reasons+=("min_lifetime_fraction ${minLifetimeFraction} < warn threshold ${WARN_THRESHOLD} (worst: ${worstZone}, ~${worstDays}d left)")
+    fi
   fi
-fi
 
-# Layer C — job health (informational; never escalates above WARNING on its own).
-if [[ "${managedCount}" -eq 0 && "${failedCount}" -eq 0 ]]; then
-  [[ "${severity}" == "OK" ]] && severity="WARNING"
-  if [[ "${CERT_WARDEN_CONCLUSION}" == "failure" ]]; then
-    reasons+=("Cert Warden run failed and produced no managed-cert metrics")
-  else
-    reasons+=("no managed-cert metrics found (no delegated zones, or metrics artifact absent)")
+  # Layer C — job health (informational; never escalates above WARNING on its own).
+  if [[ "${managedCount}" -eq 0 && "${failedCount}" -eq 0 ]]; then
+    [[ "${severity}" == "OK" ]] && severity="WARNING"
+    if [[ "${CERT_WARDEN_CONCLUSION}" == "failure" ]]; then
+      reasons+=("Cert Warden run failed and produced no managed-cert metrics")
+    else
+      reasons+=("no managed-cert metrics found (no delegated zones, or metrics artifact absent)")
+    fi
+  elif [[ "${failedCount}" -gt 0 ]]; then
+    # A few failed renewals are tolerable while lifetime is healthy; note them, warn at most.
+    [[ "${severity}" == "OK" ]] && severity="WARNING"
+    reasons+=("${failedCount} managed zone(s) reported a cert error: ${failedZones}")
   fi
-elif [[ "${failedCount}" -gt 0 ]]; then
-  # A few failed renewals are tolerable while lifetime is healthy; note them, warn at most.
-  [[ "${severity}" == "OK" ]] && severity="WARNING"
-  reasons+=("${failedCount} managed zone(s) reported a cert error: ${failedZones}")
-fi
 
-# Liveness — metrics older than the window (scaled to cert lifetime) means Cert Warden may have
-# stopped running entirely. Informational/WARNING.
-if [[ -n "${METRICS_AGE_HOURS}" ]] && awk "BEGIN { exit !(${METRICS_AGE_HOURS} > ${LIVENESS_WINDOW_HOURS}) }"; then
-  [[ "${severity}" == "OK" ]] && severity="WARNING"
-  reasons+=("latest Cert Warden metrics are ${METRICS_AGE_HOURS}h old (> ${LIVENESS_WINDOW_HOURS}h liveness window)")
+  # Liveness — metrics older than the window (scaled to cert lifetime) means Cert Warden may
+  # have stopped running entirely. Informational/WARNING.
+  if [[ -n "${METRICS_AGE_HOURS}" ]] && awk "BEGIN { exit !(${METRICS_AGE_HOURS} > ${LIVENESS_WINDOW_HOURS}) }"; then
+    [[ "${severity}" == "OK" ]] && severity="WARNING"
+    reasons+=("latest Cert Warden metrics are ${METRICS_AGE_HOURS}h old (> ${LIVENESS_WINDOW_HOURS}h liveness window)")
+  fi
 fi
 
 echo "${_action_name}: severity=${severity}"
 # endregion -------------------------------------------------------------------------------------
 
 # region: step summary --------------------------------------------------------------------------
+# UNKNOWN measured nothing, so the metric cells must say so: printing 0 / null there is the
+# same lie the notification path is being fixed to stop telling.
+if [[ "${severity}" == "UNKNOWN" ]]; then
+  dspManaged="not evaluated"
+  dspFailed="not evaluated"
+  dspMinLifetime="not evaluated"
+  dspWorst="not evaluated"
+else
+  dspManaged="${managedCount}"
+  dspFailed="${failedCount}${failedZones:+ (${failedZones})}"
+  dspMinLifetime="${minLifetimeFraction}"
+  dspWorst="${worstZone:-n/a}${worstDays:+ (~${worstDays}d left)}"
+fi
+
 {
   echo "### Cert Warden monitor — ${ENV_NAME} — ${severity}"
   echo ""
   echo "| Metric | Value |"
   echo "| --- | --- |"
-  echo "| Managed certs | ${managedCount} |"
-  echo "| Failed | ${failedCount}${failedZones:+ (${failedZones})} |"
-  echo "| min_lifetime_fraction | ${minLifetimeFraction} |"
-  echo "| Worst zone | ${worstZone:-n/a}${worstDays:+ (~${worstDays}d left)} |"
+  echo "| Managed certs | ${dspManaged} |"
+  echo "| Failed | ${dspFailed} |"
+  echo "| min_lifetime_fraction | ${dspMinLifetime} |"
+  echo "| Worst zone | ${dspWorst} |"
   echo "| Cert Warden run | ${CERT_WARDEN_CONCLUSION:-n/a} |"
   if ((${#reasons[@]})); then
     echo ""
@@ -185,10 +224,20 @@ emitOutputs() {
   # helpers: their "<tool>: " prefix corrupts GITHUB_OUTPUT keys (bit us once already).
   [[ -n "${GITHUB_OUTPUT:-}" ]] || return 0
   set-output "severity" "${severity}"
-  set-output "min-lifetime-fraction" "${minLifetimeFraction}"
-  set-output "managed-count" "${managedCount}"
-  set-output "failed-count" "${failedCount}"
-  set-output "worst-zone" "${worstZone}"
+  # UNKNOWN emits EMPTY measurements, not 0/null: a consumer gating on managed-count must not
+  # be able to read "this environment has no certificates" out of a run that never looked.
+  if [[ "${severity}" == "UNKNOWN" ]]; then
+    set-output "min-lifetime-fraction" ""
+    set-output "managed-count" ""
+    set-output "failed-count" ""
+    set-output "worst-zone" ""
+  else
+    set-output "min-lifetime-fraction" "${minLifetimeFraction}"
+    set-output "managed-count" "${managedCount}"
+    set-output "failed-count" "${failedCount}"
+    set-output "worst-zone" "${worstZone}"
+  fi
+  set-output "resolve-failed" "${RESOLVE_FAILED}"
   set-output "reasons-json" "$(printf '%s\n' "${reasons[@]:-}" | jq -R . | jq -sc 'map(select(. != ""))')"
   set-output "notified" "${notified}"
   set-output "notify-http-status" "${notifyHttpStatus}"
@@ -196,6 +245,15 @@ emitOutputs() {
 # endregion -------------------------------------------------------------------------------------
 
 # region: notify --------------------------------------------------------------------------------
+# UNKNOWN is silent by design and BEFORE the FORCE_NOTIFY escape hatch: that knob exists to
+# prove bot delivery works, not to broadcast a non-evaluation. The run annotation is the trace.
+if [[ "${severity}" == "UNKNOWN" ]]; then
+  echo "::warning::${_action_name}: ${reasons[0]:-warden run could not be resolved} — no alert raised (nothing was measured)."
+  echo "${_action_name}: severity UNKNOWN — no notification sent."
+  emitOutputs
+  exit 0
+fi
+
 if [[ "${severity}" == "OK" && "${FORCE_NOTIFY}" != "true" ]]; then
   echo "${_action_name}: status OK — no notification sent (set FORCE_NOTIFY=true to test delivery)."
   emitOutputs

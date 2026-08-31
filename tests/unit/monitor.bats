@@ -207,3 +207,85 @@ healthy_record() {
   assert_output --partial "::error::"
   assert_output --partial "partial bot configuration"
 }
+
+# --- RESOLVE_FAILED: "we did not look" must never render as a certificate finding ------------
+# Regression: a transient GitHub API failure in the caller's resolve step left run-id empty,
+# which fell through to the absent-metrics path and delivered a card claiming zero managed
+# certs — for an environment whose certificates were in fact all healthy.
+
+@test "RESOLVE_FAILED -> UNKNOWN, silent, exit 0" {
+  write_metrics_fixture "${METRICS}" "$(healthy_record)" # stale artifact must not be evaluated
+  export RESOLVE_FAILED="true"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=UNKNOWN"
+  assert_output --partial "no notification sent"
+  refute_output --partial "DRY_RUN — would POST"
+}
+
+@test "RESOLVE_FAILED never claims a cert finding (no 'no managed-cert metrics' reason)" {
+  rm -f "${METRICS}"
+  export RESOLVE_FAILED="true"
+  run bash "${MONITOR_SH}"
+  assert_success
+  refute_output --partial "no managed-cert metrics"
+  assert_output --partial "could not resolve which Cert Warden run"
+}
+
+@test "RESOLVE_FAILED stays silent even under FORCE_NOTIFY (not a delivery test)" {
+  rm -f "${METRICS}"
+  export RESOLVE_FAILED="true" FORCE_NOTIFY="true"
+  export BOT_API_BASE="https://bot.invalid/api" BOT_API_AUDIENCE="api://unittest" BOT_ALIAS="from-unittest"
+  run bash "${MONITOR_SH}"
+  assert_success
+  refute_output --partial "would POST"
+  assert_output --partial "severity=UNKNOWN"
+}
+
+@test "RESOLVE_FAILED leaves a ::warning:: annotation as the only trace" {
+  rm -f "${METRICS}"
+  export RESOLVE_FAILED="true"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "::warning::"
+  refute_output --partial "::error::"
+}
+
+@test "RESOLVE_FAILED emits EMPTY measurement outputs, not zeroes" {
+  rm -f "${METRICS}"
+  export RESOLVE_FAILED="true"
+  export GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/gh_output"
+  : >"${GITHUB_OUTPUT}"
+  run bash "${MONITOR_SH}"
+  assert_success
+  run grep -c '^severity=UNKNOWN$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+  run grep -c '^resolve-failed=true$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+  # 0 would read as "this environment has no certificates" to anything gating on the count:
+  run grep -c '^managed-count=$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+  run grep -c '^min-lifetime-fraction=$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+  # ...and the emission must still be machine-clean key=value:
+  run grep -vcE '^[a-z-]+=' "${GITHUB_OUTPUT}"
+  assert_output "0"
+}
+
+@test "RESOLVE_FAILED step summary says 'not evaluated', never 0" {
+  rm -f "${METRICS}"
+  export RESOLVE_FAILED="true"
+  run bash "${MONITOR_SH}"
+  assert_success
+  run cat "${GITHUB_STEP_SUMMARY}"
+  assert_output --partial "Cert Warden monitor — unittest — UNKNOWN"
+  assert_output --partial "| Managed certs | not evaluated |"
+  refute_output --partial "| Managed certs | 0 |"
+}
+
+@test "RESOLVE_FAILED=false is the default path (no behaviour change)" {
+  write_metrics_fixture "${METRICS}" "$(healthy_record)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=OK"
+}

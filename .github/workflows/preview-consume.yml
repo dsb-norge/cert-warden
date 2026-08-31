@@ -21,9 +21,13 @@ defaults:
 
 jobs:
   consume-reusable-monitor:
-    # A real cross-repo-style call of the reusable workflow. No warden runs exist here, so the
-    # resolve step finds nothing and the monitor reports WARNING (absence is a signal) — which
-    # exercises resolve -> (no) download -> evaluate, exit 0.
+    # A real cross-repo-style call of the reusable workflow. This repo has no workflow named
+    # "Cert Warden" (the default warden-workflow-name), so the resolve step gets a clean answer
+    # of "no such workflow" and the monitor reports WARNING (absence is a signal) — which
+    # exercises resolve -> (no) download -> evaluate, exit 0. It also guards the distinction
+    # that matters: an API that ANSWERS "nothing here" must keep warning, while an API that
+    # cannot be reached reports UNKNOWN and stays silent. Getting UNKNOWN here means that
+    # classification has regressed and a renamed warden workflow would go unnoticed.
     permissions:
       actions: read
     uses: dsb-norge/cert-warden/.github/workflows/reusable-monitor.yml@v1.0.3 # x-release-please-version

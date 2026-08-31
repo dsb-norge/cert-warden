@@ -31,9 +31,17 @@ them as-is.
 
 `METRICS_FILE`, `ENV_NAME`, `WARN_THRESHOLD` (0.30), `PAGE_THRESHOLD` (0.15),
 `LIVENESS_WINDOW_HOURS` (36), `CERT_WARDEN_CONCLUSION`, `CERT_WARDEN_RUN_URL`,
-`METRICS_AGE_HOURS`, `BOT_API_BASE`, `BOT_API_AUDIENCE`, `BOT_ALIAS`, `FORCE_NOTIFY`,
-`DRY_RUN`. All optional; without the bot triple the monitor is evaluate-only. Exit code is
-always 0 on a completed evaluation.
+`METRICS_AGE_HOURS`, `RESOLVE_FAILED` (`false`), `BOT_API_BASE`, `BOT_API_AUDIENCE`,
+`BOT_ALIAS`, `FORCE_NOTIFY`, `DRY_RUN`. All optional; without the bot triple the monitor is
+evaluate-only. Exit code is always 0 on a completed evaluation.
+
+**Severity is `OK | WARNING | CRITICAL | UNKNOWN`.** `UNKNOWN` means *nothing was measured* —
+the caller set `RESOLVE_FAILED=true` because it could not work out which warden run to
+evaluate. It is not a health verdict and it **never notifies** (not even under `FORCE_NOTIFY`);
+`managed-count`, `failed-count`, `min-lifetime-fraction` and `worst-zone` are emitted **empty**
+rather than `0`/`null`, so nothing downstream can mistake "we did not look" for "there are no
+certificates". The trace is a `::warning::` annotation on the run and the `resolve-failed`
+output. Consumers that branch on `severity` must treat an unrecognised value as "no signal".
 
 ### sweeper (`actions/sweeper/sweeper.sh`)
 

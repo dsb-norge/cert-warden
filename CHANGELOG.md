@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.4](https://github.com/dsb-norge/cert-warden/compare/v1.0.3...v1.0.4) (2026-09-01)
+
+
+### Bug Fixes
+
+* **monitor:** report UNKNOWN instead of a false cert alert when nothing was evaluated ([898c609](https://github.com/dsb-norge/cert-warden/commit/898c609b55f2bb85879c51c4b86a832eb0496830))
+* **monitor:** stop alerting on a GitHub API blip as if it were a certificate finding ([#28](https://github.com/dsb-norge/cert-warden/issues/28)) ([4ab946d](https://github.com/dsb-norge/cert-warden/commit/4ab946d2ea84f3b5300b98c3d28b4fbd42aad641))
+* **monitor:** tell a dead API apart from an empty answer when resolving the run ([ec19049](https://github.com/dsb-norge/cert-warden/commit/ec1904961413788ff22d74787c981addd2eed2c7))
+
 ## [1.0.3](https://github.com/dsb-norge/cert-warden/compare/v1.0.2...v1.0.3) (2026-08-26)
 
 

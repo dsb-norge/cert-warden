@@ -170,7 +170,7 @@ Keep vendored copies; add CI that diffs each copy against a designated upstream 
 
 Central repo ships `cert-warden`, `cert-warden-monitor`, `cert-sweeper` actions (each bundling its
 scripts + `helpers.sh`). Consumers keep writing their own full workflows, replacing the inline
-steps with `uses: dsb-infra/github-actions-cert-warden/cert-warden@v1`.
+steps with `uses: <private-org>/github-actions-cert-warden/cert-warden@v1`.
 
 - **Fix propagation:** all bash and step logic central. But the *workflow-level* logic that is
   genuinely subtle — the monitor's run-resolution (`workflow_run` payload vs `gh run list`
@@ -205,7 +205,7 @@ realistically via internal (possibly undocumented) composite actions anyway, or 
 The `dsb-norge/github-actions-terraform` model, minus its self-inflicted quirks:
 
 ```
-dsb-infra/github-actions-cert-warden        (working name)
+<private-org>/github-actions-cert-warden    (working name)
 ├── cert-warden/            action.yml + cert-warden.sh + helpers.sh
 ├── cert-warden-monitor/    action.yml + monitor.sh + helpers.sh
 ├── cert-sweeper/           action.yml + sweeper.sh + helpers.sh
@@ -322,7 +322,7 @@ on:
 jobs:
   warden:
     strategy: {fail-fast: false, max-parallel: 1, matrix: {…as today…}}
-    uses: dsb-infra/github-actions-cert-warden/.github/workflows/cert-warden.yml@v1.2.0
+    uses: <private-org>/github-actions-cert-warden/.github/workflows/cert-warden.yml@v1.2.0
     permissions: {id-token: write, contents: read}
     with:
       environment:        ${{ matrix.environment }}

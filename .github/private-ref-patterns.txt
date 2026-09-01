@@ -1,7 +1,12 @@
 # Deny-listed patterns (extended regex, one per line) for scripts/ci/check-private-references.sh.
 # This repository is public: links/references that resolve to private DSB repositories or
-# internal-only hosts must never appear in tracked files or commit messages.
+# internal-only hosts must never appear in tracked files, commit messages or PR descriptions.
 #
 # Private GitHub org (all repos in it are private):
 github\.com[:/]dsb-infra
 dsb-infra\.github\.io
+#
+# Bare owner/repo, the form `gh`, `uses:` and api.github.com URLs use — pasting a command's
+# output or an error message is the easy way to leak one. Pointing INTO a private repo is what
+# this guard prevents; the org name alone in prose is fine and appears in the design docs.
+dsb-infra/[A-Za-z0-9._-]+

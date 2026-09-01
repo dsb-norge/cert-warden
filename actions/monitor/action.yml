@@ -39,6 +39,13 @@ inputs:
     description: "Age of the metrics in hours (liveness check input)."
     required: false
     default: ""
+  resolve-failed:
+    description: >-
+      "true" when the caller could not determine which warden run to evaluate at all (e.g. the
+      GitHub API was unreachable). Reports severity UNKNOWN and stays silent — an unevaluated
+      run is not a certificate finding. See monitor.sh.
+    required: false
+    default: "false"
   bot-api-base:
     description: "Teams Notification Bot API base (e.g. https://<func>.azurewebsites.net/api). Empty => evaluate-only."
     required: false
@@ -62,16 +69,16 @@ inputs:
 
 outputs:
   severity:
-    description: "OK | WARNING | CRITICAL."
+    description: "OK | WARNING | CRITICAL | UNKNOWN (nothing was evaluated; never notifies)."
     value: ${{ steps.run.outputs.severity }}
   min-lifetime-fraction:
-    description: "The SLO number (may be null)."
+    description: "The SLO number (null when no cert had one; EMPTY when severity is UNKNOWN)."
     value: ${{ steps.run.outputs.min-lifetime-fraction }}
   managed-count:
-    description: "Managed certs evaluated."
+    description: "Managed certs evaluated (EMPTY when severity is UNKNOWN — not measured)."
     value: ${{ steps.run.outputs.managed-count }}
   failed-count:
-    description: "Managed zones reporting an error."
+    description: "Managed zones reporting an error (EMPTY when severity is UNKNOWN)."
     value: ${{ steps.run.outputs.failed-count }}
   worst-zone:
     description: "Zone with the lowest remaining lifetime."
@@ -85,6 +92,9 @@ outputs:
   notify-http-status:
     description: "HTTP status of the delivery attempt (empty when none)."
     value: ${{ steps.run.outputs.notify-http-status }}
+  resolve-failed:
+    description: "true when the warden run could not be resolved (severity is then UNKNOWN)."
+    value: ${{ steps.run.outputs.resolve-failed }}
 
 runs:
   using: composite
@@ -102,6 +112,7 @@ runs:
         CERT_WARDEN_CONCLUSION: ${{ inputs.warden-conclusion }}
         CERT_WARDEN_RUN_URL: ${{ inputs.warden-run-url }}
         METRICS_AGE_HOURS: ${{ inputs.metrics-age-hours }}
+        RESOLVE_FAILED: ${{ inputs.resolve-failed }}
         BOT_API_BASE: ${{ inputs.bot-api-base }}
         BOT_API_AUDIENCE: ${{ inputs.bot-api-audience }}
         BOT_ALIAS: ${{ inputs.bot-alias }}

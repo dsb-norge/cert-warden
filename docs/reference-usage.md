@@ -98,6 +98,8 @@ on:
     types: [completed]
   schedule:
     - cron: "17 6 * * *" # liveness watchdog: catches "warden stopped running entirely"
+    #   ^ the only trigger that looks the warden run up via the GitHub API; workflow_run gets
+    #     it from the event payload. See "when the monitor cannot resolve a run" below.
   workflow_dispatch:
     inputs:
       force_notify:
@@ -203,6 +205,26 @@ jobs:
       log-only: ${{ github.event_name != 'schedule' && inputs.log_only }}
 ```
 
+**When the monitor cannot resolve a run.** On the `schedule`/`workflow_dispatch` path the
+monitor asks the API which warden run to evaluate, and separates three outcomes:
+
+| outcome | severity | notifies |
+|---|---|---|
+| a run was found | the SLO verdict | on breach |
+| the API answered: no workflow by that name, or it has no completed runs | `WARNING` | yes |
+| the API did not answer (retried 3×) | `UNKNOWN` | **no** |
+
+The middle row is why a typo'd or renamed `warden-workflow-name` keeps warning instead of going
+quiet — a misconfiguration is a permanent, actionable finding, not a blip. The last row is the
+opposite case: nothing was measured, so the monitor claims nothing. It emits **empty**
+measurement outputs and sends nothing to Teams, not even under `force_notify`; an unevaluated
+run is not a certificate finding, and a notification per network blip only teaches the
+channel's readers to ignore it. The trace is a `::warning::` annotation on the monitor run plus
+the `resolve-failed` output, and a *persistently* failing resolve is expected to surface
+through your CA/vault's own near-expiry alerting rather than through this workflow. Note the
+`workflow_run` path cannot take that branch at all, so an environment whose warden still runs
+keeps getting evaluated normally.
+
 **Sweeper graduation ladder** (default-safe by design): ① dispatch dry-runs and review the
 candidate list → ② one destructive dispatch (`log_only: false`; the `max-deletions` spike
 guard stays armed) → ③ uncomment the cron. Full auto is a two-line change.
@@ -214,7 +236,10 @@ Just the first workflow above — monitor and sweeper are optional and independe
 ## 3. Evaluate-only monitoring (roll your own delivery)
 
 Call `reusable-monitor.yml` without `monitor-client-id`/bot inputs and consume its outputs
-(`severity`, `min-lifetime-fraction`, `failed-count`, `reasons-json`, …) in a follow-up job.
+(`severity`, `min-lifetime-fraction`, `failed-count`, `reasons-json`, `resolve-failed`, …) in a
+follow-up job. Handle `severity: UNKNOWN` — it means the monitor evaluated nothing (see below)
+and the measurement outputs are empty, so gating on `managed-count == 0` there would read "no
+certificates" out of a run that never looked.
 Enabled by design, but **unsupported** — the supported channel is the
 [Teams Notification Bot](https://github.com/dsb-norge/teams-notifier-function-app).
 

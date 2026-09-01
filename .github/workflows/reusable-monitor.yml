@@ -9,7 +9,9 @@ name: reusable-monitor
 # Caller permissions needed: contents: read is NOT needed (no checkout); actions: read (list
 # runs + download artifacts); id-token: write only when monitor-client-id is set.
 #
-# The monitor never fails the calling workflow on an evaluation outcome.
+# The monitor never fails the calling workflow on an evaluation outcome. If it cannot even
+# resolve WHICH warden run to evaluate, it reports severity UNKNOWN and stays silent rather
+# than raising a certificate alert about a run it never looked at — see actions/monitor/monitor.sh.
 
 on:
   workflow_call:
@@ -82,16 +84,19 @@ on:
         default: false
     outputs:
       severity:
-        description: "OK | WARNING | CRITICAL."
+        description: >-
+          OK | WARNING | CRITICAL | UNKNOWN. UNKNOWN means nothing was evaluated (the warden
+          run could not be resolved) — it is not a health verdict and never notifies. Treat an
+          unrecognised value as "no signal".
         value: ${{ jobs.monitor.outputs.severity }}
       min-lifetime-fraction:
-        description: "The SLO number (may be null)."
+        description: "The SLO number (null when none; EMPTY when severity is UNKNOWN)."
         value: ${{ jobs.monitor.outputs.min-lifetime-fraction }}
       managed-count:
-        description: "Managed certs evaluated."
+        description: "Managed certs evaluated (EMPTY when severity is UNKNOWN — not measured)."
         value: ${{ jobs.monitor.outputs.managed-count }}
       failed-count:
-        description: "Managed zones reporting an error."
+        description: "Managed zones reporting an error (EMPTY when severity is UNKNOWN)."
         value: ${{ jobs.monitor.outputs.failed-count }}
       reasons-json:
         description: "JSON array of alert reasons."
@@ -99,6 +104,9 @@ on:
       notified:
         description: "true when a notification was accepted by the bot."
         value: ${{ jobs.monitor.outputs.notified }}
+      resolve-failed:
+        description: "true when the warden run could not be resolved (severity is then UNKNOWN)."
+        value: ${{ jobs.monitor.outputs.resolve-failed }}
 
 defaults:
   run:
@@ -115,6 +123,7 @@ jobs:
       failed-count: ${{ steps.monitor.outputs.failed-count }}
       reasons-json: ${{ steps.monitor.outputs.reasons-json }}
       notified: ${{ steps.monitor.outputs.notified }}
+      resolve-failed: ${{ steps.monitor.outputs.resolve-failed }}
     steps:
       - name: Azure login (bot-token identity)
         if: inputs.monitor-client-id != ''
@@ -138,27 +147,82 @@ jobs:
           WR_URL: ${{ github.event.workflow_run.html_url }}
           WR_UPDATED: ${{ github.event.workflow_run.updated_at }}
         run: |
-          # Triggered by workflow_run: evaluate exactly that run. Scheduled/manual: take the
-          # most recent run that ACTUALLY ran (success or failure) — skipped runs (deploy
-          # gating) produce no metrics and are not a renewal signal. Fall back to the newest
-          # completed run, and to "nothing found" (the monitor treats absence as a signal).
+          # Triggered by workflow_run: evaluate exactly that run — no API call, so this path
+          # cannot fail to resolve. Scheduled/manual: look the run up through the API, where
+          # three outcomes must stay DISTINCT, because two are real findings and one is noise:
+          #
+          #   * a run was found                     -> evaluate it
+          #   * the API answered, but there is no    -> a real, permanent finding: WARNING.
+          #     such workflow / it has no runs          A typo'd or renamed warden-workflow-name
+          #                                             must keep warning, never go silent.
+          #   * the API did not answer at all       -> nothing was measured: UNKNOWN, silent.
+          #
+          # `gh run list --workflow <name>` collapses the last two into one non-zero exit — it
+          # resolves the name through /actions/workflows first, and reports "no such workflow"
+          # and "the network died" identically. That is how one TLS handshake timeout reported
+          # "0 managed certs" for an environment whose certificates were all healthy. So resolve
+          # the name to an id explicitly, and retry only what is actually retryable.
+          ghRetry() {
+            local attempt
+            for attempt in 1 2 3; do
+              if gh "$@"; then return 0; fi
+              if ((attempt < 3)); then
+                echo "attempt ${attempt}/3 failed (gh ${1} …) — retrying in $((attempt * 5))s" >&2
+                sleep "$((attempt * 5))"
+              fi
+            done
+            return 1
+          }
+
+          resolveFailed="false"
+          runId=""
+          conclusion=""
+          runUrl=""
+          updatedAt=""
+
           if [[ "${EVENT_NAME}" == "workflow_run" && -n "${WR_ID}" ]]; then
             runId="${WR_ID}"; conclusion="${WR_CONCLUSION}"; runUrl="${WR_URL}"; updatedAt="${WR_UPDATED}"
+          elif ! workflows=$(ghRetry api --paginate "repos/${REPO}/actions/workflows" \
+            --jq '.workflows[] | "\(.id)\t\(.name)"'); then
+            resolveFailed="true"
           else
-            read -r runId conclusion updatedAt runUrl < <(gh run list \
+            workflowId=$(awk -F'\t' -v want="${WORKFLOW_NAME}" '$2 == want { print $1; exit }' <<<"${workflows}")
+            if [[ -z "${workflowId}" ]]; then
+              # The API answered and there is no such workflow: a finding, not a blip.
+              echo "::warning::no workflow named '${WORKFLOW_NAME}' in ${REPO} — check the warden-workflow-name input."
+            elif ! runLine=$(ghRetry run list \
               --repo "${REPO}" \
-              --workflow "${WORKFLOW_NAME}" --status completed --limit 20 \
+              --workflow "${workflowId}" --status completed --limit 20 \
               --json databaseId,conclusion,updatedAt,url \
               --jq '([.[] | select(.conclusion == "success" or .conclusion == "failure")] + .)[0]
-                    | "\(.databaseId) \(.conclusion) \(.updatedAt) \(.url)"') || true
+                    | "\(.databaseId) \(.conclusion) \(.updatedAt) \(.url)"'); then
+              resolveFailed="true"
+            else
+              # Most recent run that ACTUALLY ran (success or failure) — skipped runs (deploy
+              # gating) produce no metrics and are not a renewal signal; fall back to the newest
+              # completed run. jq renders the no-runs case as the literal string "null" in every
+              # field, which must normalise to empty or the download step is handed a bad id.
+              read -r runId conclusion updatedAt runUrl <<<"${runLine}"
+              if [[ "${runId}" == "null" ]]; then
+                runId=""
+                conclusion=""
+                updatedAt=""
+                runUrl=""
+              fi
+            fi
           fi
           {
-            echo "run-id=${runId:-}"
-            echo "conclusion=${conclusion:-}"
-            echo "run-url=${runUrl:-}"
-            echo "updated-at=${updatedAt:-}"
+            echo "run-id=${runId}"
+            echo "conclusion=${conclusion}"
+            echo "run-url=${runUrl}"
+            echo "updated-at=${updatedAt}"
+            echo "resolve-failed=${resolveFailed}"
           } >>"${GITHUB_OUTPUT}"
-          echo "Resolved warden run '${runId:-none}' (${conclusion:-n/a}) updated ${updatedAt:-n/a}"
+          if [[ "${resolveFailed}" == "true" ]]; then
+            echo "The GitHub API did not answer after 3 attempts — the monitor will report UNKNOWN and stay silent."
+          else
+            echo "Resolved warden run '${runId:-none}' (${conclusion:-n/a}) updated ${updatedAt:-n/a}"
+          fi
 
       - name: Download metrics artifact
         if: steps.resolve.outputs.run-id != ''
@@ -196,6 +260,7 @@ jobs:
           warden-conclusion: ${{ steps.resolve.outputs.conclusion }}
           warden-run-url: ${{ steps.resolve.outputs.run-url }}
           metrics-age-hours: ${{ steps.age.outputs.hours }}
+          resolve-failed: ${{ steps.resolve.outputs.resolve-failed }}
           bot-api-base: ${{ inputs.bot-api-base }}
           bot-api-audience: ${{ inputs.bot-api-audience }}
           bot-alias: ${{ inputs.bot-alias }}

@@ -32,6 +32,26 @@ inputs:
     description: "true forces renewal of existing certificates."
     required: false
     default: "false"
+  max-renewals-per-run:
+    description: >-
+      Maximum number of certificates this run may issue, renew or force. Further due
+      certificates are recorded `deferred` and left for the next run; the run then walks the
+      zones most-urgent-first. The force inputs are subject to it too. 0 (default) is unlimited.
+      Size it so a whole renewal wave drains within a few days — see docs/reference-usage.md.
+    required: false
+    default: "0"
+  runs-per-day:
+    description: >-
+      How often your caller runs the warden. Only used to check that max-renewals-per-run can
+      drain a wave before the monitor alerts; set it if your schedule is not twice daily.
+    required: false
+    default: "2"
+  monitor-warn-threshold:
+    description: >-
+      The monitor's warn-threshold, mirrored here for the same drain check. Set it only if you
+      tuned the monitor's.
+    required: false
+    default: "0.30"
   tag-application-name:
     description: "ApplicationName tag applied to Key Vault certificate objects."
     required: true
@@ -60,6 +80,9 @@ outputs:
   zones-failed:
     description: "Zones whose certificate action failed this run."
     value: ${{ steps.run.outputs.zones-failed }}
+  zones-deferred:
+    description: "Zones left for the next run because the max-renewals-per-run budget was spent."
+    value: ${{ steps.run.outputs.zones-deferred }}
   min-lifetime-fraction:
     description: "Lowest remaining-lifetime fraction across managed certs (the SLO number; may be null)."
     value: ${{ steps.run.outputs.min-lifetime-fraction }}
@@ -80,6 +103,9 @@ runs:
         LE_NEW_ACCOUNT_EMAIL: ${{ inputs.le-account-email }}
         CERT_FORCE_ALL_NEW: ${{ inputs.force-all-new }}
         CERT_FORCE_RENEWAL: ${{ inputs.force-renewal }}
+        CERT_MAX_RENEWALS_PER_RUN: ${{ inputs.max-renewals-per-run }}
+        CERT_RUNS_PER_DAY: ${{ inputs.runs-per-day }}
+        CERT_MONITOR_WARN_THRESHOLD: ${{ inputs.monitor-warn-threshold }}
         CERT_AZ_RESOURCE_TAG_ApplicationName: ${{ inputs.tag-application-name }}
         CERT_AZ_RESOURCE_TAG_CreatedBy: ${{ inputs.tag-created-by }}
         CERT_AZ_RESOURCE_TAG_Description: ${{ inputs.tag-description }}
@@ -102,6 +128,7 @@ runs:
           set-output "zones-total" "$(jq 'length' "${CERT_METRICS_OUTPUT_FILE}")"
           set-output "zones-managed" "$(jq '[.[] | select(.action != "not_delegated")] | length' "${CERT_METRICS_OUTPUT_FILE}")"
           set-output "zones-failed" "$(jq '[.[] | select(.action == "failed")] | length' "${CERT_METRICS_OUTPUT_FILE}")"
+          set-output "zones-deferred" "$(jq '[.[] | select(.action == "deferred")] | length' "${CERT_METRICS_OUTPUT_FILE}")"
           minFraction="$(jq '[.[] | .lifetime_fraction_remaining // empty]
             | if length > 0 then min else null end' "${CERT_METRICS_OUTPUT_FILE}")"
           set-output "min-lifetime-fraction" "${minFraction}"

@@ -15,8 +15,8 @@
       },
       "action": {
         "type": "string",
-        "enum": ["issued", "renewed", "forced", "skipped", "failed", "none", "not_delegated"],
-        "description": "What happened for the zone this run. not_delegated zones are excluded from the SLO."
+        "enum": ["issued", "renewed", "forced", "skipped", "failed", "none", "not_delegated", "deferred"],
+        "description": "What happened for the zone this run. not_delegated zones are excluded from the SLO. deferred means the run's max-renewals-per-run budget was spent before this zone was reached: it was not evaluated, it is still due, and the next run takes it -- a healthy state, not a finding. Deferred records still carry the Key Vault validity window, so they stay in the SLO."
       },
       "kv_cert_name": {
         "type": "string",

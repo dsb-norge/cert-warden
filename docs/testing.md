@@ -42,6 +42,11 @@ Pebble's per-boot root (`CW_TEST_VERIFY_CHAIN_ROOT`), and re-packages the backin
 it. When a script grows a new `az` call, the shim fails loudly (`unhandled command`) so
 extending it is a conscious, reviewed act.
 
+Its `keyvault certificate list` answers the **union** of the two projections its callers ask
+for (the sweeper's `{name, exp}` and the warden's `{name, nbf, exp}`) — the shim ignores
+`--query`, so a caller adding a field to the projection must add it here too, or read a `null`
+that real `az` would never return.
+
 **No rate limits anywhere in CI**: Pebble explicitly implements none ("It is not presently an
 appropriate tool for testing that your client handles Boulder/Let's Encrypt rate limits
 correctly" — Pebble README). A real LE `rateLimited` error is therefore untestable here, but
@@ -84,6 +89,10 @@ a full registration + issuance still succeeds through the retry path against the
 - Fault injection via challtestsrv's management API (`:8055`): `set-txt`, `clear-txt`,
   `set-servfail`, `clear-servfail`, plus `dns-request-history` to assert what was queried.
 - Every seam override is in one place (`setup()`); see [contracts.md](contracts.md) §CW_*.
+- `LEGO_NO_RANDOM_SLEEP=true` is set there too — **not** a warden seam but lego's own env var.
+  lego sleeps a random interval before every renewal to smear fleet-wide load; in the harness
+  that is minutes of idling that exercises no code path. Production never sets it, so real runs
+  keep the smearing Let's Encrypt asks for (and which `max-renewals-per-run` exists to pace).
 
 The metrics-survive-partial-failure scenario (e2e-4) is the suite's reason to exist: the
 incident class where one failed zone aborted the run before metrics were written. Do not
@@ -110,7 +119,7 @@ row AND the test — that's the review bar.
 | P-12 | `${{ }}` interpolation into `run:` bodies = template injection; env-var indirection only | zizmor (`template-injection`) |
 | P-13 | composite actions: no `INPUT_*` autoexport; map inputs via `env:` explicitly | action shims |
 | P-14 | CRLF from Windows-side edits (`$'\r': command not found`) | `.gitattributes` |
-| P-15 | assoc-array keys containing dashes must be quoted: `${opt["vault-name"]}` — unquoted parses as arithmetic. **Bit the az shim** | az shim + shfmt |
+| P-15 | assoc-array keys must be quoted whenever they contain anything but word characters — dashes OR dots: `${opt["vault-name"]}`, `${cache["a.example.test"]}`. Unquoted, the subscript parses as arithmetic (a dotted key reads as floating point). **Bit the az shim, then the warden suite** — and note shfmt got stricter about it: v3.9 accepts what v3.13 rejects, so lint locally with the CI-pinned version | az shim + warden suite + shfmt |
 | P-16 | "next arg starts with `--` means boolean flag" heuristics corrupt PEM values (`-----BEGIN…`). **Bit the az shim** | e2e-2 (account round-trip) |
 | P-17 | lego stores accounts under `accounts/<host>[_<port>]` derived from the directory URL — derive paths the same way | e2e-1/e2e-2 |
 | P-18 | real KV strips the import password: cert-backing secrets come back as password-less PKCS#12 (and Go's pkcs12 needs `-legacy` under OpenSSL 3) | az shim + e2e-2 |

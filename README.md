@@ -10,6 +10,8 @@ delivered as GitHub Actions composite actions and reusable workflows:
   renewal timing driven by ARI/RFC 9773), and imports them into Azure Key Vault. Consumers
   such as Azure Application Gateway read the certificates via versionless secret ids and
   rotate automatically — no certificates in Terraform state, no deploy-time renewals.
+  Fleets big enough that a renewal wave becomes a multi-hour job can pace one with
+  `max-renewals-per-run` (see [pacing](docs/reference-usage.md#pacing-a-large-fleet-max-renewals-per-run)).
 - **monitor** — evaluates each warden run against a lifetime-fraction SLO (pages only on
   *sustained* renewal failure, never on a single red run) and optionally notifies a
   [Teams Notification Bot](https://github.com/dsb-norge/teams-notifier-function-app).

@@ -558,6 +558,7 @@ jobs:
           WARDEN_TOTAL: ${{ steps.warden.outputs.zones-total }}
           WARDEN_MANAGED: ${{ steps.warden.outputs.zones-managed }}
           WARDEN_METRICS: ${{ steps.warden.outputs.metrics-file }}
+          WARDEN_DEFERRED: ${{ steps.warden.outputs.zones-deferred }}
           MON_SEVERITY: ${{ steps.monitor.outputs.severity }}
           MON_FAILED: ${{ steps.monitor.outputs.failed-count }}
           MON_NOTIFIED: ${{ steps.monitor.outputs.notified }}
@@ -565,8 +566,10 @@ jobs:
           SWEEP_DELETED: ${{ steps.sweeper.outputs.deleted-count }}
           SWEEP_JSON: ${{ steps.sweeper.outputs.candidates-json }}
         run: |
-          [[ "${WARDEN_TOTAL}" == "1" && "${WARDEN_MANAGED}" == "0" ]] || {
-            echo "::error::warden outputs unexpected: total=${WARDEN_TOTAL} managed=${WARDEN_MANAGED}"
+          # zones-deferred must be a real 0, not empty: the smoke sets no cap, and a caller
+          # gating on it has to be able to tell "nothing deferred" from "output not wired".
+          [[ "${WARDEN_TOTAL}" == "1" && "${WARDEN_MANAGED}" == "0" && "${WARDEN_DEFERRED}" == "0" ]] || {
+            echo "::error::warden outputs unexpected: total=${WARDEN_TOTAL} managed=${WARDEN_MANAGED} deferred=${WARDEN_DEFERRED}"
             exit 1
           }
           jq -e '.[0].action == "not_delegated"' "${WARDEN_METRICS}" >/dev/null

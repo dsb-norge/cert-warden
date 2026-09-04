@@ -85,6 +85,12 @@ setup() {
   export CW_LEGO_DNS_RESOLVERS="127.0.0.1:8053"
   export CW_LEGO_EXTRA_ARGS="--dns.propagation.disable-ans"
   export CW_DIG_ARGS="@127.0.0.1 -p 5354"
+  # lego sleeps a random interval before every RENEWAL to smear fleet-wide load (the single
+  # biggest contributor to a real run's wall clock — and the reason max-renewals-per-run exists).
+  # Here it is pure padding: it exercises no code path, and a renewal scenario can otherwise sit
+  # idle for minutes. lego's own env var, not a warden seam — the warden never sets it, so
+  # production keeps the smearing that Let's Encrypt asks clients for.
+  export LEGO_NO_RANDOM_SLEEP="true"
 
   # File-scoped (not per-test) so later scenarios consume earlier scenarios' metrics —
   # e2e-5 feeds e2e-4's partial-failure metrics to the monitor.
@@ -266,4 +272,108 @@ JSON
   assert_success
   run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
   assert_output "forced"
+}
+
+@test "e2e-9 renewal cap: forcing respects the budget, and the next run drains the rest" {
+  # Runs against the chaos-configured Pebble from e2e-7/8 (cw-test.internal holds a valid cert;
+  # zone2 was dropped in e2e-4 and never re-issued, so it needs a fresh certificate).
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+
+  # Budget of one, with force-renewal on: exactly the case that must not run away, since a
+  # forced renewal of a whole environment is how a fleet ends up renewing in a single wave.
+  : >"${CW_STATE}/calls.log"
+  CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  assert_output --partial "Renewal budget for this run: 1"
+  assert_output --partial "Renewal budget spent (1/1)"
+
+  # cw-test.internal has a certificate and therefore an expiry; zone2 has none, so it sorts
+  # last (nothing is in service for it that could expire) and is the one deferred.
+  run jq -r 'map({(.zone): .action}) | add | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "forced
+deferred"
+
+  # The deferred zone was not evaluated at all — that is where the hours are saved. Not one
+  # Azure call names it: no record-set listing, no certificate download, so no `lego run` and
+  # none of lego's random renewal delay. And it is not an error, so it must carry none.
+  run grep -c "zone2" "${CW_STATE}/calls.log"
+  assert_output "0"
+  run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .error' "${METRICS_OUT}"
+  assert_output ""
+
+  # A deferred record still names its Key Vault object, so the monitor keeps counting it as a
+  # managed certificate rather than losing sight of it.
+  run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .kv_cert_name' "${METRICS_OUT}"
+  assert_output "le-cert-staging-zone2-cw-test-internal-pfx"
+
+  # Next run, same cap, no force: the freshly forced cert is not due (ARI says so), that costs
+  # nothing against the budget, and the deferred zone is picked up. No state carried over —
+  # dueness alone got us here.
+  CERT_MAX_RENEWALS_PER_RUN=1 run_warden
+  assert_success
+  run jq -r 'map({(.zone): .action}) | add | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "skipped
+issued"
+
+  # Third run: force again, now that BOTH zones hold a certificate. This is the case the whole
+  # design turns on — a deferred zone with a certificate in the vault must carry that
+  # certificate's real validity window, because lifetime_fraction_remaining is the monitor's SLO
+  # input and a null there would drop the zone out of the alert entirely. The cap would then look
+  # like a success precisely while hiding a backlog that had stopped draining.
+  CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  # Freshly issued, so the cap can comfortably drain it: the sizing guard stays quiet. Asserted
+  # here, before any other `run` overwrites $output with its own (pitfall: `run` is the capture).
+  refute_output --partial "::warning::"
+
+  # zone2 was issued a moment ago, so it expires LAST and is the one deferred — urgency order.
+  run jq -r 'map({(.zone): .action}) | add | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "forced
+deferred"
+  # THE property: a deferred zone that holds a certificate reports that certificate's real
+  # window, which only the Key Vault pre-pass can supply.
+  run jq -e '
+    .[] | select(.zone == "zone2.cw-test.internal")
+    | .days_to_expiry != null
+      and .lifetime_fraction_remaining != null
+      and .lifetime_fraction_remaining > 0.9
+      and .not_after != ""
+  ' "${METRICS_OUT}"
+  assert_success
+
+  # Fourth run: the wave has drained, so the cap has nothing left to defer and says nothing.
+  CERT_MAX_RENEWALS_PER_RUN=1 run_warden
+  assert_success
+  refute_output --partial "Renewal budget spent"
+  refute_output --partial "::warning::"
+  run jq -r '[.[] | select(.action == "deferred")] | length' "${METRICS_OUT}"
+  assert_output "0"
+}
+
+@test "e2e-10 no cap set: enumeration order and the artifact are untouched" {
+  # The compatibility guarantee. An uncapped run must make no Key Vault certificate listing at
+  # all and must keep Azure's enumeration order, so an existing consumer sees byte-identical
+  # behaviour down to the artifact's record order.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]},
+  {"name": "cw-test.internal",       "nameServers": ["ns1.cw-test.internal."]}
+]
+JSON
+  : >"${CW_STATE}/calls.log"
+  run_warden
+  assert_success
+
+  # Record order follows the zone listing, NOT urgency.
+  run jq -r '[.[].zone] | join(",")' "${METRICS_OUT}"
+  assert_output "zone2.cw-test.internal,cw-test.internal"
+
+  # And the ordering pre-pass never ran.
+  run grep -c "keyvault certificate list" "${CW_STATE}/calls.log"
+  assert_output "0"
 }

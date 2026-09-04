@@ -289,3 +289,67 @@ healthy_record() {
   assert_success
   assert_output --partial "severity=OK"
 }
+
+# --- the renewal cap's `deferred` action ------------------------------------------------------
+# A capped warden run records the zones it left for the next run as `deferred`. Two properties
+# have to hold at once, and they pull in opposite directions: deferring must not raise an alert
+# by itself, and it must not SUPPRESS one either. The monitor gets that for free by being
+# action-blind for the SLO and keying on the lifetime fraction — these tests pin that down, since
+# a well-meaning "treat deferred as healthy" special case would break the second property.
+
+deferred_record() {
+  local zone="$1" frac="$2" days="$3"
+  jq -n -c --arg z "${zone}" --argjson f "${frac}" --argjson d "${days}" \
+    '{zone:$z, action:"deferred", kv_cert_name:("le-cert-production-" + $z + "-pfx"),
+      lifetime_fraction_remaining:$f, days_to_expiry:$d, error:""}'
+}
+
+@test "deferred zones are not a finding: a healthy capped run stays OK and silent" {
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"renewed.example.test","action":"renewed","kv_cert_name":"le-cert-production-renewed-pfx","lifetime_fraction_remaining":0.99,"days_to_expiry":89,"error":""}' \
+    "$(deferred_record "d1.example.test" 0.34 31)" \
+    "$(deferred_record "d2.example.test" 0.40 36)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=OK"
+  assert_output --partial "no notification sent"
+}
+
+@test "deferred zones count as managed, not as failures" {
+  # `deferred` carries an empty error and is not `not_delegated`, so it must land in the managed
+  # count and nowhere near the failed count — otherwise a capped run would page on every pass.
+  write_metrics_fixture "${METRICS}" \
+    "$(deferred_record "d1.example.test" 0.50 45)" \
+    "$(deferred_record "d2.example.test" 0.60 54)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "managed=2 failed=0"
+  assert_output --partial "severity=OK"
+}
+
+@test "a deferred zone whose lifetime has sunk still alerts (the cap must not blind the SLO)" {
+  # THE property that makes the cap safe to ship: the warden fills deferred records with the Key
+  # Vault validity window precisely so a backlog that stops draining is still visible here. If a
+  # deferred record ever reported a null fraction, this alert would go quiet exactly when the
+  # capped fleet was in trouble — a cap would look like a success while hiding one.
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"fresh.example.test","action":"renewed","kv_cert_name":"le-cert-production-fresh-pfx","lifetime_fraction_remaining":0.99,"days_to_expiry":89,"error":""}' \
+    "$(deferred_record "stuck.example.test" 0.12 11)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=CRITICAL"
+  assert_output --partial "stuck.example.test"
+}
+
+@test "an entirely deferred run is still measured, not treated as 'nothing evaluated'" {
+  # A run that spent its whole budget before the first zone it could act on (or one whose wave is
+  # bigger than the cap) records only deferred zones. That is a measurement, so the managed=0
+  # Layer C warning must NOT fire.
+  write_metrics_fixture "${METRICS}" \
+    "$(deferred_record "d1.example.test" 0.32 29)" \
+    "$(deferred_record "d2.example.test" 0.33 30)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=OK"
+  refute_output --partial "no managed-cert metrics found"
+}

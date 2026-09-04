@@ -130,11 +130,10 @@ function loadConfig() {
   # NOTE: renewal timing is governed by ARI (RFC 9773 renewalInfo), which lego v5 enables by
   # default: lego queries Let's Encrypt's renewalInfo endpoint each run and renews within the
   # CA-suggested window (which LE can move earlier, e.g. for mass revocation). If ARI is ever
-  # unreachable, lego falls back to its fixed `--renew-days` threshold (default 30). lego v5.3.1 has
-  # no dynamic / fraction-of-lifetime renewal option, so we rely on ARI + that default; revisit
-  # `--renew-days` (or adopt a dynamic threshold once a lego release ships one) if Let's Encrypt
-  # shortens certificate lifetimes enough that a 30-day fallback would never trigger.
-  # See renewExistingCertificate.
+  # unreachable, lego falls back to a PROPORTIONAL threshold: with `--renew-days` left unset it
+  # renews once a third of the certificate's lifetime remains (half, for a lifetime of 10 days
+  # or less). Nothing to tune and nothing to revisit if Let's Encrypt shortens certificate
+  # lifetimes -- the fallback scales with whatever it issues. See renewExistingCertificate.
 
   # Azure resource tags for certificate resources in KeyVault
   kvCertSecretTags=(
@@ -530,24 +529,30 @@ function renewExistingCertificate() {
   # earlier, e.g. for mass revocation). When not due, lego writes no new files and the caller's
   # "no new PFX -> renewal not needed" path leaves the Key Vault cert untouched.
   #
-  # ARI is authoritative here and enabled by default; if it is ever unreachable lego falls back to
-  # its fixed `--renew-days` threshold (default 30). ARI also spreads renewals to avoid a
+  # ARI is authoritative here and enabled by default. ARI also spreads renewals to avoid a
   # fleet-wide thundering herd, and ARI-coordinated renewals are exempt from LE rate limits.
   #
   #   --force-cert-domains : re-issue if the cert's domain set drifts from --domains (e.g. an A
   #                          record was added/removed), instead of renewing the stale SAN set.
   #   --renew-force        : only when an operator forces it (CERT_FORCE_RENEWAL); bypasses ARI.
-  # NB: lego v5.3.1 has no `--dynamic` (fraction-of-lifetime) flag — the only renewal knobs on
-  # `lego run` are ARI (default) and `--renew-days`. Do not add `--dynamic`; lego rejects it
-  # (verified against v5.3.1 AND master, 2026-08 — no such flag, no upstream issue/PR for one).
   #
-  # TODO(cert-warden): the ARI-unavailable fallback is lego's fixed `--renew-days` (default 30).
-  #   That is correct for today's 90-day certs but would be wrong once LE issues short-lived certs
-  #   (a 6-day cert is always "<30 days left"). If/when LE shortens the certificate lifetime for
-  #   these zones, set `--renew-days` explicitly to roughly 1/3 of the issued lifetime so the
-  #   fallback stays proportionate. ARI stays primary regardless; `--renew-days` only governs the
-  #   rare case where the renewalInfo endpoint is unreachable. (If a future lego release adds a
-  #   proportional / "dynamic" renewal window, prefer it over hand-tuning `--renew-days`.)
+  # The ARI-unavailable fallback is PROPORTIONAL, and we deliberately leave it alone. Verified
+  # against lego v5.3.1 (cmd/cmd_run_renew.go, getFlagRenewDays + getDueDate): the renewal
+  # decision consults `--renew-days` only when ARI returned no renewal time, and when the flag is
+  # UNSET lego computes the due date as
+  #
+  #     notAfter - lifetime/3       (lifetime/2 when the lifetime is <= 10 days)
+  #
+  # i.e. renew at a third of the lifetime remaining -- the same ~0.333 point ARI suggests and the
+  # monitor's thresholds are placed against. Passing `--renew-days N` would REPLACE that with a
+  # fixed N-day window, so setting it is a downgrade, not a safety net: it is the fixed form that
+  # breaks on short-lived certificates (a 6-day certificate is permanently "< 30 days left"),
+  # while the default already scales to whatever lifetime Let's Encrypt issues. Nothing here
+  # needs revisiting if LE shortens certificate lifetimes.
+  #
+  # There is still no `--dynamic` flag; do not add one (lego rejects it). The proportional
+  # behaviour is not a flag -- it is what `--renew-days` does when you leave it out. It arrived as
+  # an option in lego v4.25.0 and is the default in the v5 line.
   local _renewControl="--force-cert-domains "
   if [ "${forceRenewal}" = true ]; then
     _renewControl+="--renew-force "
@@ -861,7 +866,7 @@ function main() {
         if [ "${forceRenewal}" = true ]; then
           log-info "  Existing certificate for ${zoneName} will be renewed now (forceRenewal=true)"
         else
-          log-info "  Evaluating renewal of existing certificate for ${zoneName} via ARI (fallback: lego --renew-days default)"
+          log-info "  Evaluating renewal of existing certificate for ${zoneName} via ARI (fallback: lego's proportional renew window, 1/3 of lifetime)"
         fi
 
         if ! renewExistingCertificate; then

@@ -101,6 +101,21 @@ setup() {
   assert_output --partial "ON"
 }
 
+@test "zoneCertKvSecretName derives the Key Vault object name from zone + LE environment" {
+  source "${WARDEN_SH}"
+  loadConfig
+  run zoneCertKvSecretName "a.example.test"
+  assert_output "le-cert-staging-a-example-test-pfx"
+  # The derivation must match the one the zone body uses, for every dot in the zone.
+  run zoneCertKvSecretName "deep.sub.example.test"
+  assert_output "le-cert-staging-deep-sub-example-test-pfx"
+
+  export LE_ENVIRONMENT_NAME="production"
+  loadConfig
+  run zoneCertKvSecretName "a.example.test"
+  assert_output "le-cert-production-a-example-test-pfx"
+}
+
 @test "recordCertMetric writes a monitor-safe failed record" {
   source "${WARDEN_SH}"
   loadConfig # recordCertMetric labels records with the LE environment from config

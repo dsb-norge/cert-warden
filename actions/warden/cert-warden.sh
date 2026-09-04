@@ -215,6 +215,18 @@ function letsencryptAccountExistsInKeyVault() {
   fi
 }
 
+# Key Vault certificate object name for a zone: le-cert-<le-env>-<zone-with-dashes>-pfx.
+# Single source of truth for the derivation: the deferred path (see the renewal budget in main)
+# needs the name without walking the zone body that normally computes it.
+# Arguments:
+#   1: DNS zone name
+# Uses globals: letsencryptEnvironment
+# Returns:
+#   The Key Vault certificate object name on stdout
+function zoneCertKvSecretName() {
+  echo "le-cert-${letsencryptEnvironment}-${1//./-}-pfx"
+}
+
 # Check if a DNS zone is publicly delegated by comparing configured NS records with public NS records
 # Arguments:
 #   1: DNS zone name
@@ -776,7 +788,7 @@ function main() {
       legoCertMetaPath="${legoCertificatesPath}/${zoneName}.json"
 
       # letsencrypt-certificate-<environment>-<zone>-pfx
-      certKvPfxSecretName="le-cert-${letsencryptEnvironment}-${zoneName//./-}-pfx"
+      certKvPfxSecretName="$(zoneCertKvSecretName "${zoneName}")"
       # Key Vault secret holding lego's metadata for this cert (per LE-env, via the name above).
       certKvMetaSecretName="${certKvPfxSecretName}-meta"
 

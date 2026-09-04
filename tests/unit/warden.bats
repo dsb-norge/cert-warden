@@ -458,6 +458,27 @@ JSON
   [ "${#zoneProcessingOrder[@]}" -eq 2 ]
 }
 
+@test "resolveZoneProcessingOrder survives a resource group with no zones" {
+  # An empty zone list must not trip `set -u` on the array expansion in main's loop.
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[]'
+  echo '[]' >"${BATS_TEST_TMPDIR}/certlist.json"
+  stub_az_cert_list
+  run bash -c "
+    set -euo pipefail
+    source '${WARDEN_SH}'; loadConfig
+    publicZonesJson='[]'
+    export PATH='${BATS_TEST_TMPDIR}/bin:${PATH}'
+    resolveZoneProcessingOrder
+    for z in \"\${zoneProcessingOrder[@]}\"; do echo \"zone: \${z}\"; done
+    echo SURVIVED
+  "
+  assert_success
+  assert_output --partial "SURVIVED"
+  refute_output --partial "zone: "
+}
+
 @test "resolveZoneProcessingOrder maps zones to Key Vault names per the LE environment" {
   # Same zones, production environment: the staging certificates must not match.
   export LE_ENVIRONMENT_NAME="production"

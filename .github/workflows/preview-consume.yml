@@ -30,7 +30,7 @@ jobs:
     # classification has regressed and a renamed warden workflow would go unnoticed.
     permissions:
       actions: read
-    uses: dsb-norge/cert-warden/.github/workflows/reusable-monitor.yml@v1.0.4 # x-release-please-version
+    uses: dsb-norge/cert-warden/.github/workflows/reusable-monitor.yml@preview/pr-31 # x-release-please-version
     with:
       environment: "preview-e2e"
       dry-run: true
@@ -57,7 +57,7 @@ jobs:
     steps:
       - name: Setup lego (remote fetch)
         id: lego
-        uses: dsb-norge/cert-warden/actions/setup-lego@v1.0.4 # x-release-please-version
+        uses: dsb-norge/cert-warden/actions/setup-lego@preview/pr-31 # x-release-please-version
 
       - name: Assert lego installed
         env:
@@ -77,7 +77,7 @@ jobs:
 
       - name: Monitor action (remote fetch — proves shared-lib resolution, D-7)
         id: monitor
-        uses: dsb-norge/cert-warden/actions/monitor@v1.0.4 # x-release-please-version
+        uses: dsb-norge/cert-warden/actions/monitor@preview/pr-31 # x-release-please-version
         with:
           metrics-file: ${{ runner.temp }}/metrics.json
           environment-label: "preview-e2e"

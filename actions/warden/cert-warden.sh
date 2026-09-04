@@ -565,6 +565,84 @@ function recordCertMetric() {
     >>"${metricsFile}"
 }
 
+# Annotate the run when the configured cap cannot drain its backlog before the monitor starts
+# alerting on it.
+#
+# The cap and the monitor's SLO are in tension by construction. ARI suggests renewal at roughly
+# two thirds through a certificate's lifetime (a remaining fraction of ~0.333), the monitor warns
+# below 0.30, and a cap deliberately holds due certificates past that renewal point. Sized well,
+# a drain finishes inside that margin and nobody hears about it. Sized badly, one long run is
+# traded for days of warning cards -- the same problem wearing different clothes, and the sort of
+# alert churn that teaches an on-call to ignore the channel. So predict it here, where the
+# numbers are known:
+#
+#   drain, in days                = ceil(deferred / cap) / runs-per-day
+#   days a deferred cert can wait = days_to_expiry * (1 - warn-threshold / lifetime_fraction)
+#
+# The second line needs no assumption about certificate lifetime: it falls out of the fraction
+# and the days that produced it, which is what keeps the model duration-independent (a 6-day and
+# a 90-day certificate are judged alike, exactly as in the monitor). If the drain is slower than
+# the most urgent deferred certificate can wait, name the cap that would have fitted.
+#
+# Silent unless a cap is set AND something was actually deferred: a correctly sized cap says
+# nothing at all.
+# Arguments:
+#   1: path to this run's metrics artifact (JSON array)
+# Returns:
+#   None, may emit a ::warning:: workflow annotation
+# Uses globals: maxRenewalsPerRun, wardenRunsPerDay, monitorWarnThreshold
+function warnIfCapCannotDrain() {
+  local _metricsPath="$1"
+  [ "${maxRenewalsPerRun}" -gt 0 ] || return 0
+
+  local _deferredCount
+  _deferredCount=$(jq '[.[] | select(.action == "deferred")] | length' "${_metricsPath}")
+  [ "${_deferredCount}" -gt 0 ] || return 0
+
+  # The most urgent deferred certificate: the fewest days before it sinks below the warn
+  # threshold. Records with no validity window (never issued, or a failed pre-pass) cannot be
+  # judged and are left out rather than guessed at.
+  local _worst
+  _worst=$(jq -r --argjson warn "${monitorWarnThreshold}" '
+    [ .[]
+      | select(.action == "deferred")
+      | select((.days_to_expiry // null) != null)
+      | select((.lifetime_fraction_remaining // 0) > 0)
+      | {zone: .zone, wait: (.days_to_expiry * (1 - ($warn / .lifetime_fraction_remaining)))}
+    ]
+    | sort_by(.wait)
+    | if length == 0 then empty else "\(.[0].zone)\t\(.[0].wait)" end' "${_metricsPath}")
+  [ -n "${_worst}" ] || return 0
+
+  local _worstZone _worstWait
+  IFS=$'\t' read -r _worstZone _worstWait <<<"${_worst}"
+
+  # awk, not bash arithmetic: every quantity here is fractional.
+  local _verdict
+  _verdict=$(awk -v deferred="${_deferredCount}" -v cap="${maxRenewalsPerRun}" \
+    -v runs="${wardenRunsPerDay}" -v wait="${_worstWait}" 'BEGIN {
+      drainRuns = int((deferred + cap - 1) / cap)
+      drainDays = drainRuns / runs
+      if (drainDays <= wait) { print "ok"; exit }
+      # Smallest cap that drains inside the margin. A margin already spent leaves nothing to
+      # size against, so the recommendation becomes "move the whole backlog now".
+      minCap = (wait > 0) ? deferred / (runs * wait) : deferred
+      minCap = (minCap == int(minCap)) ? int(minCap) : int(minCap) + 1
+      if (minCap > deferred || minCap < 1) { minCap = deferred }
+      printf "short %.1f %.1f %d", drainDays, (wait > 0 ? wait : 0), minCap
+    }')
+  [ "${_verdict}" != "ok" ] || return 0
+
+  local _tag _drainDays _wait _minCap
+  read -r _tag _drainDays _wait _minCap <<<"${_verdict}"
+  # Single line: a workflow annotation cannot carry newlines.
+  echo "::warning::${_action_name}: CERT_MAX_RENEWALS_PER_RUN=${maxRenewalsPerRun} is too small for this backlog." \
+    "Draining ${_deferredCount} deferred certificate(s) at ${wardenRunsPerDay} run(s)/day takes ~${_drainDays} days," \
+    "but ${_worstZone} drops below the monitor's warn threshold (${monitorWarnThreshold}) in ~${_wait} days," \
+    "so the monitor will alert while the backlog is still draining." \
+    "Raise the cap to ${_minCap} (or clear it for this wave) — see docs/reference-usage.md."
+}
+
 # Get common lego "run" options as a string.
 #
 # lego v5 note: `run` and `renew` were unified into a single `lego run` command, and what
@@ -1190,6 +1268,9 @@ function main() {
   metricsDeferred=$(jq '[.[] | select(.action == "deferred")] | length' "${certMetricsOutputFile}")
   metricsMinFraction=$(jq '[.[] | .lifetime_fraction_remaining // empty] | if length > 0 then min else null end' "${certMetricsOutputFile}")
   log-info "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} deferred=${metricsDeferred} min_lifetime_fraction=${metricsMinFraction}"
+
+  # Deferring is healthy; deferring FASTER THAN THE FLEET CAN AFFORD is not. Say so on the run.
+  warnIfCapCannotDrain "${certMetricsOutputFile}"
 
   # GitHub step summary: a human-readable per-run table (no-op outside GitHub Actions).
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then

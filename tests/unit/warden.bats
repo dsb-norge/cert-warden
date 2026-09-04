@@ -493,3 +493,142 @@ JSON
   ' "${metricsFile}"
   assert_success
 }
+
+# --- run pacing: the cap's sizing guard -------------------------------------------------------
+# A cap holds due certificates past their ARI renewal point, which is precisely what the
+# monitor's min_lifetime_fraction SLO measures. Sized well nobody hears about it; sized badly one
+# long run becomes days of warning cards. The guard predicts which of the two you configured.
+
+# Deferred fixture: a certificate `lifetime_days` long that is `age_days` old, i.e. still due.
+deferred_record() {
+  local zone="$1" lifetime="$2" age="$3"
+  local dte frac
+  dte=$((lifetime - age))
+  frac=$(awk "BEGIN{printf \"%.4f\", ${dte}/${lifetime}}")
+  jq -n -c --arg z "${zone}" --argjson dte "${dte}" --argjson frac "${frac}" \
+    '{zone:$z, kv_cert_name:("le-cert-staging-" + $z), action:"deferred", days_to_expiry:$dte,
+      lifetime_fraction_remaining:$frac, error:""}'
+}
+
+@test "warnIfCapCannotDrain says nothing when no cap is configured" {
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    "$(deferred_record "a.example.test" 90 62)"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "warnIfCapCannotDrain says nothing when the cap drains inside the monitor's margin" {
+  # 28 certificates just past due (90-day, 61 days old => fraction 0.322, ~1.9 days of margin
+  # before 0.30). Cap 20 at twice daily drains in 0.5 days: comfortably inside.
+  export CERT_MAX_RENEWALS_PER_RUN="20"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=()
+  for i in $(seq 1 28); do recs+=("$(deferred_record "z${i}.example.test" 90 61)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+# The headline case from the request that prompted this feature: 51 certificates in one wave with
+# a cap of 3 needs ~8.5 days at twice daily, and the fleet has ~3 days before the monitor warns.
+@test "warnIfCapCannotDrain warns, and recommends a cap that fits, when the drain is too slow" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=()
+  for i in $(seq 1 51); do recs+=("$(deferred_record "z${i}.example.test" 90 60)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  assert_output --partial "::warning::"
+  assert_output --partial "CERT_MAX_RENEWALS_PER_RUN=3 is too small"
+  assert_output --partial "Draining 51 deferred certificate(s) at 2 run(s)/day takes ~8.5 days"
+  assert_output --partial "warn threshold (0.30)"
+  # 51 certificates, ~3 days of margin, 2 runs/day => 9 per run.
+  assert_output --partial "Raise the cap to 9"
+  # Annotations cannot span lines — silence the load/config chatter so wc sees only the warning.
+  run bash -c "{ source '${WARDEN_SH}'; loadConfig; } >/dev/null; warnIfCapCannotDrain '${BATS_TEST_TMPDIR}/m.json' | wc -l"
+  assert_output "1"
+}
+
+@test "warnIfCapCannotDrain names the most urgent deferred certificate, not the first" {
+  export CERT_MAX_RENEWALS_PER_RUN="1"
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    "$(deferred_record "healthy.example.test" 90 58)" \
+    "$(deferred_record "urgent.example.test" 90 84)" \
+    "$(deferred_record "middling.example.test" 90 61)"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_output --partial "urgent.example.test"
+  refute_output --partial "healthy.example.test"
+}
+
+@test "warnIfCapCannotDrain tells the operator to clear the cap when the margin is already gone" {
+  # Already below the warn threshold: there is no margin left to size a cap against, so the
+  # recommendation degenerates to "move the whole backlog now".
+  export CERT_MAX_RENEWALS_PER_RUN="2"
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    "$(deferred_record "a.example.test" 90 70)" \
+    "$(deferred_record "b.example.test" 90 71)" \
+    "$(deferred_record "c.example.test" 90 72)"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_output --partial "::warning::"
+  assert_output --partial "in ~0.0 days"
+  assert_output --partial "Raise the cap to 3"
+}
+
+@test "warnIfCapCannotDrain is silent when nothing was deferred" {
+  export CERT_MAX_RENEWALS_PER_RUN="5"
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    '{"zone":"a.example.test","kv_cert_name":"x","action":"renewed","days_to_expiry":89,"lifetime_fraction_remaining":0.99,"error":""}'
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "warnIfCapCannotDrain cannot judge deferred records without a validity window" {
+  # The degraded pre-pass path: no window means no honest prediction, so stay quiet rather than
+  # guess -- but do not crash on the arithmetic either (a null would divide by zero).
+  export CERT_MAX_RENEWALS_PER_RUN="1"
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    '{"zone":"a.example.test","kv_cert_name":"x","action":"deferred","days_to_expiry":null,"lifetime_fraction_remaining":null,"error":""}'
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "warnIfCapCannotDrain honours a tuned cadence and warn threshold" {
+  # A consumer running four times a day drains twice as fast, so the same cap that warns at
+  # twice-daily must not warn here.
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  export CERT_RUNS_PER_DAY="4"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=()
+  for i in $(seq 1 6); do recs+=("$(deferred_record "z${i}.example.test" 90 61)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  refute_output --partial "::warning::"
+
+  # A consumer that lowered the monitor's warn threshold has more margin, so the same backlog
+  # that would warn at 0.30 must not warn at 0.20.
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  export CERT_RUNS_PER_DAY="2"
+  export CERT_MONITOR_WARN_THRESHOLD="0.20"
+  loadConfig
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  refute_output --partial "::warning::"
+  assert_success
+}

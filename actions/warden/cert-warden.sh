@@ -23,6 +23,9 @@
 #     - LE_ENVIRONMENT_NAME:  Let's Encrypt environment to use, either "staging" or "production" (default: "staging")
 #     - CERT_FORCE_ALL_NEW:   If set to "true", forces new certificates for all DNS zones (default: "false")
 #     - CERT_FORCE_RENEWAL:   If set to "true", forces renewal of existing certificates (default: "false")
+#     - CERT_MAX_RENEWALS_PER_RUN: Maximum number of certificates this run may issue, renew or
+#                             force. Further due certificates are recorded as "deferred" and left
+#                             for the next run. 0 or unset means unlimited (default: 0)
 #   Test seams (NOT supported for production use — defaults are production behaviour; see docs/contracts.md):
 #     - CW_ACME_DIRECTORY_URL:  Override the ACME directory URL (default: derived from LE_ENVIRONMENT_NAME)
 #     - CW_LEGO_DNS_PROVIDER:   lego DNS-01 provider (default: "azuredns"; tests use "exec")
@@ -76,6 +79,44 @@ function loadConfig() {
   # if a certificate already exists for a given DNS zone, a forced renewal of the certificate will be triggered if set to true
   #   note: if forceNew=true, this setting is ignored
   forceRenewal=${CERT_FORCE_RENEWAL:-false}
+
+  # run pacing
+  # ------------------------------------------------------------
+
+  # Maximum number of MUTATING certificate actions (issued/renewed/forced) one run may perform.
+  # 0 (or unset) is unlimited, which is the historical behaviour.
+  #
+  # Why a cap exists at all: ARI schedules renewal relative to ISSUANCE, so a fleet issued
+  # together renews together -- and each renewal re-issues it together again. The shape of the
+  # first issuance is the shape of every renewal wave, indefinitely; nothing about it
+  # self-corrects. Each renewal costs minutes of wall clock (DNS-01 propagation plus lego's
+  # deliberate random smearing), so a wave of tens of zones is a multi-hour job, and on a shared
+  # self-hosted runner that blocks unrelated work for the duration. A cap spreads one wave across
+  # several runs. It needs no cursor or state between runs: dueness is already the selector, the
+  # deferred certificates are still due next run, and the set shrinks as they renew.
+  #
+  # A typo must not silently read as "unlimited" -- that is exactly the multi-hour run the cap is
+  # there to prevent -- so an unparsable value fails the run instead.
+  maxRenewalsPerRun=${CERT_MAX_RENEWALS_PER_RUN:-0}
+  if ! [[ "${maxRenewalsPerRun}" =~ ^[0-9]+$ ]]; then
+    log-error "CERT_MAX_RENEWALS_PER_RUN must be a non-negative integer ('0' or unset = unlimited), got: '${maxRenewalsPerRun}'"
+    exit 1
+  fi
+
+  # Inputs to the cap's sizing guard (see warnIfCapCannotDrain). Neither is knowable from inside
+  # a single run -- the schedule lives in the caller and the threshold lives in the monitor -- so
+  # both are configuration, defaulted to the documented shape (twice-daily runs, monitor default
+  # WARN_THRESHOLD). Override them only if your callers actually differ.
+  wardenRunsPerDay=${CERT_RUNS_PER_DAY:-2}
+  if ! [[ "${wardenRunsPerDay}" =~ ^[1-9][0-9]*$ ]]; then
+    log-error "CERT_RUNS_PER_DAY must be a positive integer, got: '${wardenRunsPerDay}'"
+    exit 1
+  fi
+  monitorWarnThreshold=${CERT_MONITOR_WARN_THRESHOLD:-0.30}
+  if ! [[ "${monitorWarnThreshold}" =~ ^([01]|[01]\.[0-9]+)$ ]]; then
+    log-error "CERT_MONITOR_WARN_THRESHOLD must be a fraction between 0 and 1 with a leading digit (e.g. '0.30'), got: '${monitorWarnThreshold}'"
+    exit 1
+  fi
 
   # azure resource references
   # ------------------------------------------------------------
@@ -172,6 +213,23 @@ function logCertificateActionError() {
 }
 
 #endregion Error Tracking
+
+# =====================================================================================================================
+#region Run pacing state
+# =====================================================================================================================
+
+# Mutating certificate actions (issued/renewed/forced) performed so far this run -- the budget
+# spent against maxRenewalsPerRun. Assignment form on increment, never ((x++)), for the same
+# reason as certificateActionErrorCount: see logCertificateActionError.
+certificateMutationCount=0
+
+# The order this run walks the zones in, plus the Key Vault validity window per zone. Populated
+# by resolveZoneProcessingOrder; declared here so library-mode sourcing under `set -u` is safe.
+declare -a zoneProcessingOrder=()
+declare -A zoneCertNotBefore=()
+declare -A zoneCertNotAfter=()
+
+#endregion Run pacing state
 
 # =====================================================================================================================
 #region Functions
@@ -373,6 +431,75 @@ function restoreLegoMetadataFromKeyVault() {
   fi
   log-info "  No lego metadata in KeyVault yet for ${_metaSecretName}; lego will treat this as a new issuance"
   return 1
+}
+
+# Decide the order this run walks the zones in, and cache each zone's certificate validity
+# window from Key Vault. Only called when a cap is configured; two things depend on it.
+#
+# 1. ORDER. Without a cap the walk order is cosmetic -- every due certificate is acted on either
+#    way. With a cap the order decides WHICH certificates renew, and Azure's zone listing carries
+#    no ordering guarantee at all. So sort most-urgent-first (ascending remaining validity): the
+#    cap can then only ever defer a certificate with more time left than the ones it renewed.
+#    That is the strongest guarantee available under any cap, and it is why there is no separate
+#    "always renew below N days" escape hatch -- on a fleet issued together (which is precisely
+#    the shape a cap is for) every certificate would claim that exemption in the same run, handing
+#    back the multi-hour job the cap exists to prevent. Zones with NO certificate sort last:
+#    nothing is in service for them, so nothing can expire, and a wave drains long before a newly
+#    added zone waits meaningfully.
+#
+# 2. METRICS. A deferred zone is never downloaded, so its record has no PEM to read from. One
+#    certificate listing supplies the validity window for every managed certificate, which keeps
+#    days_to_expiry and lifetime_fraction_remaining REAL on deferred records -- see
+#    recordCertMetric for why a null there would be actively dangerous.
+#
+# A failed listing is not fatal: fall back to enumeration order with no validity windows
+# (degraded metrics for one run) rather than refusing to maintain any certificate at all.
+# Arguments:
+#   None, uses global variables:
+#     publicZonesJson
+#     certKvName
+#     letsencryptEnvironment
+# Returns:
+#   None, sets global variables:
+#     zoneProcessingOrder (array, output)
+#     zoneCertNotBefore   (associative array, output)
+#     zoneCertNotAfter    (associative array, output)
+function resolveZoneProcessingOrder() {
+  # Enumeration order is the fallback for every early return below.
+  mapfile -t zoneProcessingOrder < <(echo "${publicZonesJson}" | jq -r '.[].name')
+  zoneCertNotBefore=()
+  zoneCertNotAfter=()
+
+  # The az call is if-tested (errexit disabled inside, pitfall P-4), so the shape of the answer
+  # is checked explicitly: a non-array would otherwise flow into jq below as a silent empty set.
+  local _kvCertListJson
+  if ! _kvCertListJson="$(az keyvault certificate list --vault-name "${certKvName}" \
+    --query "[].{name:name, nbf:attributes.notBefore, exp:attributes.expires}" -o json)" ||
+    ! jq -e 'type == "array"' <<<"${_kvCertListJson}" >/dev/null 2>&1; then
+    log-warn "Could not list certificates in KeyVault ${certKvName}: keeping enumeration order, and deferred zones will be recorded without a validity window"
+    return 0
+  fi
+
+  # Key Vault renders expiry as UTC ISO-8601 (2026-11-03T12:00:00+00:00), so sorting the strings
+  # IS sorting chronologically. Zones without a certificate get rank 1 and land at the end.
+  local _orderJson
+  _orderJson="$(jq -c --argjson zones "${publicZonesJson}" --arg prefix "le-cert-${letsencryptEnvironment}-" '
+      (map({key: .name, value: .}) | from_entries) as $byName
+      | $zones
+      | map(.name as $zone
+            | (($byName[$prefix + ($zone | gsub("\\."; "-")) + "-pfx"]) // {}) as $cert
+            | {zone: $zone, nbf: ($cert.nbf // ""), exp: ($cert.exp // "")})
+      | sort_by((if .exp == "" then 1 else 0 end), .exp)' <<<"${_kvCertListJson}")"
+
+  mapfile -t zoneProcessingOrder < <(jq -r '.[].zone' <<<"${_orderJson}")
+
+  local _zone _nbf _exp
+  while IFS=$'\t' read -r _zone _nbf _exp; do
+    zoneCertNotBefore["${_zone}"]="${_nbf}"
+    zoneCertNotAfter["${_zone}"]="${_exp}"
+  done < <(jq -r '.[] | [.zone, .nbf, .exp] | @tsv' <<<"${_orderJson}")
+
+  log-info "  Zone order for this run is most-urgent-first (ascending remaining validity)"
 }
 
 # Append one per-certificate metric record (JSON) to the run's metrics accumulator.
@@ -754,9 +881,20 @@ function main() {
   publicZonesCount=$(echo "${publicZonesJson}" | jq 'length')
   log-info "Number of public DNS zones found: ${publicZonesCount}"
 
+  # Walk order. A cap changes what the order MEANS (see resolveZoneProcessingOrder), so the
+  # pre-pass runs only when one is set -- an uncapped run keeps enumeration order and makes no
+  # extra Azure calls, which is what keeps "no cap set" identical to the behaviour before it
+  # existed, artifact record order included.
+  if [ "${maxRenewalsPerRun}" -gt 0 ]; then
+    log-info "Renewal budget for this run: ${maxRenewalsPerRun} mutating certificate action(s)"
+    resolveZoneProcessingOrder
+  else
+    mapfile -t zoneProcessingOrder < <(echo "${publicZonesJson}" | jq -r '.[].name')
+  fi
+
   end-group # Enumerate
 
-  for zoneName in $(echo "${publicZonesJson}" | jq -r '.[].name'); do
+  for zoneName in "${zoneProcessingOrder[@]}"; do
     start-group "Zone: ${zoneName}"
     log-info "Determining certificate operations for DNS zone: ${zoneName}"
 
@@ -776,6 +914,30 @@ function main() {
       continue # to next zone
     else
       log-info "  Zone is publicly delegated, proceeding"
+
+      # The renewal budget (CERT_MAX_RENEWALS_PER_RUN). ARI decides dueness INSIDE lego, so the
+      # budget cannot be spent by predicting which zones are due -- it is spent by counting the
+      # mutations that actually happened, which is also why `skipped`, `not_delegated` and
+      # `failed` cost nothing. Once it is gone the remaining zones are not evaluated at all: no
+      # Key Vault download, no `lego run`, no ACME traffic and none of lego's random renewal
+      # delay -- which is where a run's hours actually go. They are still due, so the next run
+      # takes them.
+      #
+      # Deliberately AFTER the delegation check: that check is cheap (one dig) and keeps
+      # `not_delegated` accurate, which matters because the monitor counts everything that is
+      # not `not_delegated` as a managed certificate.
+      #
+      # Forcing is subject to the budget too. That is not a theoretical case: a single
+      # `force-renewal` dispatch re-issuing an entire environment is one of the ways a fleet ends
+      # up renewing in one wave in the first place. An operator who really does want everything
+      # at once expresses it by leaving the cap unset.
+      if [ "${maxRenewalsPerRun}" -gt 0 ] && [ "${certificateMutationCount}" -ge "${maxRenewalsPerRun}" ]; then
+        certKvPfxSecretName="$(zoneCertKvSecretName "${zoneName}")"
+        log-info "  Renewal budget spent (${certificateMutationCount}/${maxRenewalsPerRun}), deferring ${zoneName} to the next run"
+        recordCertMetric "deferred" "-" "" \
+          "${zoneCertNotBefore[${zoneName}]:-}" "${zoneCertNotAfter[${zoneName}]:-}"
+        continue # to next zone
+      fi
 
       # random pfx password, used when storing locally, in key vault there is no password
       log-info "  Generating random temporary password for PFX certificate"
@@ -985,6 +1147,10 @@ function main() {
           [ "${renewing}" = true ] && metricAction="renewed"
           [ "${renewing}" = true ] && [ "${forceRenewal}" = true ] && metricAction="forced"
           recordCertMetric "${metricAction}" "${certPath}" ""
+          # This is the ONLY place a certificate actually changed, so it is the only place the
+          # renewal budget is spent. Assignment form, never ((x++)) -- see
+          # logCertificateActionError for the incident that rule comes from.
+          certificateMutationCount=$((certificateMutationCount + 1))
         else
           logCertificateActionError "Failed to import certificate into KeyVault"
           recordCertMetric "failed" "-" "failed to import certificate into KeyVault"
@@ -1019,15 +1185,18 @@ function main() {
   metricsTotal=$(jq 'length' "${certMetricsOutputFile}")
   metricsManaged=$(jq '[.[] | select(.action != "not_delegated")] | length' "${certMetricsOutputFile}")
   metricsFailed=$(jq '[.[] | select(.action == "failed")] | length' "${certMetricsOutputFile}")
+  # Deferred is a HEALTHY state -- the cap working as configured -- and is reported so an
+  # operator can watch a wave drain across runs without opening the artifact.
+  metricsDeferred=$(jq '[.[] | select(.action == "deferred")] | length' "${certMetricsOutputFile}")
   metricsMinFraction=$(jq '[.[] | .lifetime_fraction_remaining // empty] | if length > 0 then min else null end' "${certMetricsOutputFile}")
-  log-info "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} min_lifetime_fraction=${metricsMinFraction}"
+  log-info "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} deferred=${metricsDeferred} min_lifetime_fraction=${metricsMinFraction}"
 
   # GitHub step summary: a human-readable per-run table (no-op outside GitHub Actions).
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "## Cert Warden — \`${letsencryptEnvironment}\` run summary"
       echo ""
-      echo "zones: **${metricsTotal}** · managed: **${metricsManaged}** · failed: **${metricsFailed}** · min lifetime remaining: **${metricsMinFraction}**"
+      echo "zones: **${metricsTotal}** · managed: **${metricsManaged}** · failed: **${metricsFailed}** · deferred: **${metricsDeferred}** · min lifetime remaining: **${metricsMinFraction}**"
       echo ""
       echo "| zone | action | days to expiry | lifetime % left | key type | error |"
       echo "| --- | --- | ---: | ---: | --- | --- |"

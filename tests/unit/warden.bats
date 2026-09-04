@@ -55,6 +55,52 @@ setup() {
   [ "${digArgs}" = "@127.0.0.1 -p 5354" ]
 }
 
+@test "loadConfig: the renewal cap is unlimited by default" {
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${maxRenewalsPerRun}" -eq 0 ]
+  [ "${wardenRunsPerDay}" -eq 2 ]
+  [ "${monitorWarnThreshold}" = "0.30" ]
+}
+
+@test "loadConfig: the renewal cap and its sizing-guard inputs are configurable" {
+  export CERT_MAX_RENEWALS_PER_RUN="5"
+  export CERT_RUNS_PER_DAY="4"
+  export CERT_MONITOR_WARN_THRESHOLD="0.25"
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${maxRenewalsPerRun}" -eq 5 ]
+  [ "${wardenRunsPerDay}" -eq 4 ]
+  [ "${monitorWarnThreshold}" = "0.25" ]
+}
+
+# A typo'd cap must NOT read as "unlimited": that is exactly the multi-hour, runner-blocking run
+# the cap exists to prevent, and it would fail silently at the worst possible moment.
+@test "loadConfig: an unparsable renewal cap fails the run loudly" {
+  run bash -c "set -euo pipefail; export CERT_MAX_RENEWALS_PER_RUN='five'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  assert_output --partial "CERT_MAX_RENEWALS_PER_RUN must be a non-negative integer"
+  refute_output --partial "REACHED"
+
+  run bash -c "set -euo pipefail; export CERT_MAX_RENEWALS_PER_RUN='-3'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  refute_output --partial "REACHED"
+}
+
+@test "loadConfig: the sizing-guard inputs are validated too" {
+  run bash -c "set -euo pipefail; export CERT_RUNS_PER_DAY='0'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  assert_output --partial "CERT_RUNS_PER_DAY must be a positive integer"
+
+  # A bare ".30" is rejected on purpose: it reaches jq as --argjson and is not valid JSON.
+  run bash -c "set -euo pipefail; export CERT_MONITOR_WARN_THRESHOLD='.30'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  assert_output --partial "CERT_MONITOR_WARN_THRESHOLD must be a fraction"
+
+  run bash -c "set -euo pipefail; export CERT_MONITOR_WARN_THRESHOLD='30'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+}
+
 @test "getCommonLegoRunOptions honours the seams" {
   export CW_ACME_DIRECTORY_URL="https://localhost:14000/dir"
   export CW_LEGO_DNS_PROVIDER="exec"
@@ -326,5 +372,124 @@ AZSTUB
   assert_success
   assert_output --partial "SURVIVED"
   run jq -s -e '.[0].san == [] and .[0].days_to_expiry != null' "${metricsFile}"
+  assert_success
+}
+
+# --- run pacing: zone order + validity-window cache -------------------------------------------
+# The cap makes the walk order load-bearing (it decides WHICH certificates renew), so the order
+# is asserted directly rather than left to whatever Azure's listing happens to return.
+
+# Stub `az keyvault certificate list` with a fixed answer; every other az call fails loudly.
+stub_az_cert_list() {
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  cat >"${BATS_TEST_TMPDIR}/bin/az" <<AZSTUB
+#!/usr/bin/env bash
+if [[ "\${1} \${2} \${3}" == "keyvault certificate list" ]]; then
+  cat "${BATS_TEST_TMPDIR}/certlist.json"
+  exit 0
+fi
+echo "unexpected az call: \$*" >&2
+exit 1
+AZSTUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+}
+
+@test "resolveZoneProcessingOrder sorts most-urgent-first and puts uncertified zones last" {
+  source "${WARDEN_SH}"
+  loadConfig
+  # b expires first, then a; c has no certificate at all. Enumeration order is deliberately
+  # neither alphabetical nor urgency order, so a pass-through would be visible.
+  publicZonesJson='[{"name":"a.example.test"},{"name":"c.example.test"},{"name":"b.example.test"}]'
+  cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
+[
+  {"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00"},
+  {"name":"le-cert-staging-b-example-test-pfx","nbf":"2026-05-01T00:00:00+00:00","exp":"2026-10-01T00:00:00+00:00"},
+  {"name":"le-cert-staging-unrelated-pfx","nbf":"2026-01-01T00:00:00+00:00","exp":"2026-02-01T00:00:00+00:00"}
+]
+JSON
+  stub_az_cert_list
+  resolveZoneProcessingOrder
+
+  # Urgency order: b (Oct) -> a (Nov) -> c (no cert, nothing in service to lose).
+  run echo "${zoneProcessingOrder[*]}"
+  assert_output "b.example.test a.example.test c.example.test"
+
+  # ... and the validity windows are cached for the deferred records to use.
+  [ "${zoneCertNotAfter["b.example.test"]}" = "2026-10-01T00:00:00+00:00" ]
+  [ "${zoneCertNotBefore["a.example.test"]}" = "2026-06-01T00:00:00+00:00" ]
+  [ -z "${zoneCertNotAfter["c.example.test"]}" ]
+  # An unrelated vault certificate must not leak into the run.
+  [ "${#zoneProcessingOrder[@]}" -eq 3 ]
+}
+
+@test "resolveZoneProcessingOrder degrades to enumeration order when the listing fails" {
+  # A failed listing must not stop the warden maintaining certificates: it costs the ordering
+  # and the deferred records' validity window for one run, nothing more.
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"a.example.test"},{"name":"c.example.test"},{"name":"b.example.test"}]'
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"${BATS_TEST_TMPDIR}/bin/az"
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+
+  run resolveZoneProcessingOrder
+  assert_success
+  assert_output --partial "Could not list certificates in KeyVault"
+
+  resolveZoneProcessingOrder
+  run echo "${zoneProcessingOrder[*]}"
+  assert_output "a.example.test c.example.test b.example.test"
+  [ -z "${zoneCertNotAfter["a.example.test"]:-}" ]
+}
+
+@test "resolveZoneProcessingOrder rejects a non-array listing rather than silently emptying" {
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"a.example.test"},{"name":"b.example.test"}]'
+  echo '{"error":"throttled"}' >"${BATS_TEST_TMPDIR}/certlist.json"
+  stub_az_cert_list
+
+  run resolveZoneProcessingOrder
+  assert_success
+  assert_output --partial "Could not list certificates in KeyVault"
+  resolveZoneProcessingOrder
+  [ "${#zoneProcessingOrder[@]}" -eq 2 ]
+}
+
+@test "resolveZoneProcessingOrder maps zones to Key Vault names per the LE environment" {
+  # Same zones, production environment: the staging certificates must not match.
+  export LE_ENVIRONMENT_NAME="production"
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"a.example.test"}]'
+  cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
+[{"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00"}]
+JSON
+  stub_az_cert_list
+  resolveZoneProcessingOrder
+  [ -z "${zoneCertNotAfter["a.example.test"]}" ]
+}
+
+@test "the deferred action is part of the shipped metrics contract" {
+  # The monitor is action-blind for the SLO, but a consumer validating the artifact against the
+  # schema must accept a deferred record.
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="deferred.example.test"
+  certKvPfxSecretName="le-cert-staging-deferred-example-test-pfx"
+  recordCertMetric "deferred" "-" "" \
+    "$(date -u -d '60 days ago' +'%Y-%m-%dT%H:%M:%S+00:00')" \
+    "$(date -u -d '30 days' +'%Y-%m-%dT%H:%M:%S+00:00')"
+
+  schema="${REPO_ROOT}/contracts/metrics.schema.json"
+  run jq -e --slurpfile schema "${schema}" -s '
+    ($schema[0].items.required) as $req
+    | ($schema[0].items.properties.action.enum) as $actions
+    | all(.[]; . as $rec | ($req | all(. as $k | $rec | has($k))) and (($actions | index($rec.action)) != null))
+  ' "${metricsFile}"
   assert_success
 }

@@ -25,7 +25,14 @@ them as-is.
 | `LE_ENVIRONMENT_NAME` | no (`staging`) | `staging` or `production` |
 | `CERT_FORCE_ALL_NEW` | no (`false`) | Force new certs for all zones |
 | `CERT_FORCE_RENEWAL` | no (`false`) | Force renewal of existing certs |
+| `CERT_MAX_RENEWALS_PER_RUN` | no (`0`) | Cap on mutating actions per run; `0` = unlimited. See [pacing](reference-usage.md#pacing-a-large-fleet-max-renewals-per-run) |
+| `CERT_RUNS_PER_DAY` | no (`2`) | The caller's warden cadence; only feeds the cap's sizing guard |
+| `CERT_MONITOR_WARN_THRESHOLD` | no (`0.30`) | Mirror of the monitor's `WARN_THRESHOLD`; only feeds the same guard |
 | `CERT_METRICS_OUTPUT_FILE` | no | Where the metrics artifact is written |
+
+An unparsable value for any of the three pacing variables **fails the run**. That is
+deliberate: a typo'd cap silently reading as "unlimited" reinstates exactly the multi-hour,
+runner-blocking run the cap exists to prevent, and it would do so at the worst possible moment.
 
 ### monitor (`actions/monitor/monitor.sh`)
 
@@ -68,6 +75,29 @@ JSON array, one record per zone; formal schema in
 [`contracts/metrics.schema.json`](../contracts/metrics.schema.json) (validated by the unit
 suite). The warden writes it **even when the run fails partially** — a failed zone must still
 produce a record; that guarantee is regression-tested at every layer.
+
+### The `action` vocabulary
+
+`issued | renewed | forced | skipped | failed | not_delegated | deferred`.
+
+`deferred` means the run's `max-renewals-per-run` budget was spent before the zone was reached:
+it was **not evaluated**, it is still due, and the next run takes it. It is a healthy state, not
+a finding — but note what that does and does not mean for the monitor:
+
+- The monitor is **action-blind for the SLO**. It never branches on `deferred`; it keys on
+  `lifetime_fraction_remaining`. So there is nothing to "teach" it, and nothing to special-case.
+- Deferred records therefore carry the **Key Vault validity window**, giving them a real
+  `days_to_expiry` and `lifetime_fraction_remaining`. This is load-bearing. A null there would
+  drop the zone out of `min_lifetime_fraction` entirely, and the run would look healthier the
+  more certificates it declined to touch — a backlog that stopped draining would go unnoticed.
+- The flip side is that a cap **deliberately holds certificates past their renewal point**,
+  which is precisely what the SLO measures. A cap sized too small for the wave therefore trips
+  the monitor's `WARNING` while draining. The warden predicts that and annotates the run; the
+  sizing rule is in [reference-usage.md](reference-usage.md#pacing-a-large-fleet-max-renewals-per-run).
+
+Adding `deferred` was a **minor** bump: no consumer branches on the action except to recognise
+`failed` and `not_delegated`, and a `deferred` record is deliberately neither. A consumer that
+validates the artifact against a pinned older copy of the schema must bump it.
 
 The reusable warden workflow uploads it as artifact
 `cert-warden-metrics-<environment>-<run_id>-<run_attempt>`; the reusable monitor workflow

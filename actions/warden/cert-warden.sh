@@ -382,13 +382,25 @@ function restoreLegoMetadataFromKeyVault() {
 # best-effort: a missing/invalid cert file yields null detail fields but still records the
 # zone, action and error.
 # Arguments:
-#   1: action  (issued|renewed|forced|skipped|failed|not_delegated)
+#   1: action  (issued|renewed|forced|skipped|failed|not_delegated|deferred)
 #   2: certificate file (PEM) to read details from, or "-" for none
 #   3: error message ("" if none)
+#   4: notBefore fallback (optional) — used only when there is no readable PEM
+#   5: notAfter fallback (optional)  — used only when there is no readable PEM
 # Uses globals: zoneName, certKvPfxSecretName, letsencryptEnvironment, metricsFile
+#
+# The fallback pair exists because not every recorded zone has its certificate on disk: a zone
+# the run declines to act on was never downloaded. Given the Key Vault validity window, the
+# record still carries a real days_to_expiry / lifetime_fraction_remaining — which is not a
+# nicety, since lifetime_fraction_remaining IS the monitor's SLO input. A record that reported
+# null there would quietly remove the zone from the alert, and "we did not look" must never be
+# indistinguishable from "all is well" (the same principle as the monitor's UNKNOWN severity).
+# The two sources format dates differently (OpenSSL's "Sep  4 12:00:00 2026 GMT" vs Key Vault's
+# ISO-8601); `date -d` reads both, and the derived numeric fields are what consumers use.
 function recordCertMetric() {
-  local _action="$1" _certFile="$2" _err="${3:-}"
+  local _action="$1" _certFile="$2" _err="${3:-}" _nbFallback="${4:-}" _naFallback="${5:-}"
   local _nb="" _na="" _serial="" _issuer="" _keytype="" _sans="[]" _dte="null" _frac="null"
+  local _naEpoch="" _nbEpoch="" _now
   if [ "${_certFile}" != "-" ] && [ -f "${_certFile}" ] && openssl x509 -in "${_certFile}" -noout &>/dev/null; then
     _nb=$(openssl x509 -in "${_certFile}" -noout -startdate 2>/dev/null | sed 's/notBefore=//')
     _na=$(openssl x509 -in "${_certFile}" -noout -enddate 2>/dev/null | sed 's/notAfter=//')
@@ -400,9 +412,17 @@ function recordCertMetric() {
     _keytype=$(openssl x509 -in "${_certFile}" -noout -text 2>/dev/null | grep -oiE "ASN1 OID: [a-zA-Z0-9-]+" | head -1 | sed 's/ASN1 OID: //' || true)
     _sans=$(openssl x509 -in "${_certFile}" -noout -ext subjectAltName 2>/dev/null | grep -oE "DNS:[^,]+" | sed 's/DNS://; s/ //g' | jq -R . | jq -s -c . 2>/dev/null || true)
     [ -z "${_sans}" ] && _sans="[]"
-    local _naEpoch _nbEpoch _now
+  else
+    _nb="${_nbFallback}"
+    _na="${_naFallback}"
+  fi
+
+  # Validity-window fields, from whichever source supplied the dates (guarded: an empty date
+  # would make `date -d` fall back to "now" or fail, and pipefail would take the run with it
+  # before the metrics artifact was written -- the P-7 incident class).
+  if [ -n "${_na}" ]; then
     _naEpoch=$(date -d "${_na}" +%s 2>/dev/null || echo "")
-    _nbEpoch=$(date -d "${_nb}" +%s 2>/dev/null || echo "")
+    [ -n "${_nb}" ] && _nbEpoch=$(date -d "${_nb}" +%s 2>/dev/null || echo "")
     _now=$(date +%s)
     [ -n "${_naEpoch}" ] && _dte=$(((_naEpoch - _now) / 86400))
     if [ -n "${_naEpoch}" ] && [ -n "${_nbEpoch}" ] && [ "${_naEpoch}" -gt "${_nbEpoch}" ]; then

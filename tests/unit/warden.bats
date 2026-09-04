@@ -138,6 +138,80 @@ setup() {
   assert_success
 }
 
+# A zone the run declines to walk has no PEM on disk, so the validity window has to arrive as
+# arguments. The point of the exercise is lifetime_fraction_remaining: it is the monitor's SLO
+# input, and a record that reported null there would silently drop the zone out of the alert.
+@test "recordCertMetric derives the validity window from fallback dates (no PEM)" {
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="fallback.example.test"
+  certKvPfxSecretName="le-cert-staging-fallback-example-test-pfx"
+
+  # A 90-day certificate, 60 days in: ~30 days left, ~1/3 of its lifetime remaining. Key
+  # Vault's own ISO-8601-with-offset rendering, deliberately, not OpenSSL's format.
+  nb="$(date -u -d '60 days ago' +'%Y-%m-%dT%H:%M:%S+00:00')"
+  na="$(date -u -d '30 days' +'%Y-%m-%dT%H:%M:%S+00:00')"
+  recordCertMetric "deferred" "-" "" "${nb}" "${na}"
+
+  run jq -s -e '
+    .[0].action == "deferred"
+    and .[0].error == ""
+    and .[0].kv_cert_name == "le-cert-staging-fallback-example-test-pfx"
+    and .[0].days_to_expiry >= 29 and .[0].days_to_expiry <= 30
+    and (.[0].lifetime_fraction_remaining > 0.32 and .[0].lifetime_fraction_remaining < 0.34)
+  ' "${metricsFile}"
+  assert_success
+}
+
+@test "recordCertMetric leaves the window null when no dates are available at all" {
+  # The degraded path: the pre-pass listing failed, so a deferred record has no window. It must
+  # still be a well-formed record (and must NOT invent a date from an empty `date -d`).
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="nowindow.example.test"
+  certKvPfxSecretName="le-cert-staging-nowindow-pfx"
+  run bash -c "
+    set -euo pipefail
+    source '${WARDEN_SH}'; loadConfig
+    metricsFile='${metricsFile}'; zoneName='nowindow.example.test'; certKvPfxSecretName='x-pfx'
+    recordCertMetric 'deferred' '-' '' '' ''
+    echo SURVIVED
+  "
+  assert_success
+  assert_output --partial "SURVIVED"
+  run jq -s -e '
+    .[0].action == "deferred"
+    and .[0].days_to_expiry == null
+    and .[0].lifetime_fraction_remaining == null
+    and .[0].not_after == ""
+  ' "${metricsFile}"
+  assert_success
+}
+
+# A readable PEM must keep winning over any fallback: the served certificate is the truth, the
+# Key Vault attributes are only a stand-in for when it was never fetched.
+@test "recordCertMetric prefers the PEM over fallback dates" {
+  source "${WARDEN_SH}"
+  loadConfig
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -keyout "${BATS_TEST_TMPDIR}/k.pem" -out "${BATS_TEST_TMPDIR}/c.pem" \
+    -days 10 -subj "/CN=pem.example.test" >/dev/null 2>&1
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="pem.example.test"
+  certKvPfxSecretName="le-cert-staging-pem-pfx"
+  # Fallbacks describe a wildly different (1-year) certificate; the PEM's 10 days must win.
+  recordCertMetric "renewed" "${BATS_TEST_TMPDIR}/c.pem" "" \
+    "$(date -u -d '1 year ago' +'%Y-%m-%dT%H:%M:%S+00:00')" \
+    "$(date -u -d '1 year' +'%Y-%m-%dT%H:%M:%S+00:00')"
+  run jq -s -e '.[0].days_to_expiry <= 10 and .[0].serial != ""' "${metricsFile}"
+  assert_success
+}
+
 @test "recordCertMetric output conforms to contracts/metrics.schema.json" {
   source "${WARDEN_SH}"
   loadConfig

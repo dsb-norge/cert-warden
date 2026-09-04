@@ -11,17 +11,19 @@
 #  normal and self-heals. The signal is lifetime-relative, so the same thresholds work for
 #  90-day or 6-day certs and never fire on transient blips.
 #
-#  Threshold placement — both defaults MUST sit below the renewal point, not above it. ARI
-#  (RFC 9773) suggests renewal about two thirds of the way through a certificate's lifetime,
-#  i.e. at a remaining fraction of ~0.333 (30 days on a 90-day cert); lego's fallback when ARI
-#  is unreachable (`--renew-days 30`) lands on the same point. That ratio is what makes the
-#  fraction model duration-independent. A threshold above 0.333 therefore alerts on healthy
-#  steady state: every certificate crosses it days before renewal is even permitted, and stays
-#  there until the next scheduled warden run renews it. Read the defaults as "renewal is
-#  overdue by": WARN 0.30 ~= 3 days (~6 twice-daily runs) past due, PAGE 0.15 ~= 2.5 weeks
+#  Threshold placement — both defaults MUST sit below the renewal point, not above it. ARI (RFC
+#  9773) suggests renewal about two thirds of the way through a certificate's lifetime, i.e. at
+#  a remaining fraction of ~0.333 (30 days on a 90-day cert); lego's fallback when ARI is
+#  unreachable lands on the same point BY CONSTRUCTION, not by coincidence: with `--renew-days`
+#  unset, lego renews at a third of the lifetime remaining whatever the lifetime is (a half
+#  below 10 days, which sits further above 0.333 and so is still safe). That ratio is what
+#  makes the fraction model duration-independent. A threshold above 0.333 therefore alerts on
+#  healthy steady state: every certificate crosses it days before renewal is even permitted,
+#  and stays there until the next scheduled warden run renews it. Read the defaults as "renewal
+#  is overdue by": WARN 0.30 ~= 3 days (~6 twice-daily runs) past due, PAGE 0.15 ~= 2.5 weeks
 #  past due with expiry closing in. The gap below 0.333 is deliberate margin — the ARI window
-#  is a span the CA chooses and may shift, so renewal can legitimately land a little later
-#  than the nominal point.
+#  is a span the CA chooses and may shift, so renewal can legitimately land a little later than
+#  the nominal point.
 #
 #  Unevaluated is neither healthy nor an alert. When the caller cannot work out WHICH warden
 #  run to look at (RESOLVE_FAILED — a GitHub API blip on the runner), nothing has been

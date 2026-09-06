@@ -25,14 +25,23 @@ them as-is.
 | `LE_ENVIRONMENT_NAME` | no (`staging`) | `staging` or `production` |
 | `CERT_FORCE_ALL_NEW` | no (`false`) | Force new certs for all zones |
 | `CERT_FORCE_RENEWAL` | no (`false`) | Force renewal of existing certs |
-| `CERT_MAX_RENEWALS_PER_RUN` | no (`0`) | Cap on mutating actions per run; `0` = unlimited. See [pacing](reference-usage.md#pacing-a-large-fleet-max-renewals-per-run) |
-| `CERT_RUNS_PER_DAY` | no (`2`) | The caller's warden cadence; only feeds the cap's sizing guard |
+| `CERT_MAX_RENEWALS_PER_RUN` | no (`0`) | Cap on renewals/forces per run — zones the vault already holds a certificate for; `0` = unlimited. See [pacing](reference-usage.md#pacing-a-large-fleet) |
+| `CERT_MAX_NEW_ISSUANCE_PER_RUN` | no (`0`) | Cap on first issuances per run — zones with no certificate yet; `0` = unlimited. A **separate** budget |
+| `CERT_RUNS_PER_DAY` | no (`2`) | The caller's warden cadence; only feeds the renewal cap's sizing guard |
 | `CERT_MONITOR_WARN_THRESHOLD` | no (`0.30`) | Mirror of the monitor's `WARN_THRESHOLD`; only feeds the same guard |
 | `CERT_METRICS_OUTPUT_FILE` | no | Where the metrics artifact is written |
 
-An unparsable value for any of the three pacing variables **fails the run**. That is
-deliberate: a typo'd cap silently reading as "unlimited" reinstates exactly the multi-hour,
-runner-blocking run the cap exists to prevent, and it would do so at the worst possible moment.
+An unparsable value for any of the pacing variables **fails the run**. That is deliberate: a
+typo'd cap silently reading as "unlimited" reinstates exactly the multi-hour, runner-blocking run
+the cap exists to prevent, and it would do so at the worst possible moment.
+
+**The two budgets are independent, and a zone's class follows the vault, not the recorded
+action.** A zone the vault holds a certificate for draws on `CERT_MAX_RENEWALS_PER_RUN`; a zone it
+does not draws on `CERT_MAX_NEW_ISSUANCE_PER_RUN`. So a SAN-drift re-issue records `issued` but
+spends renewal budget — correct, because it is maintenance of a zone already in service. If the
+Key Vault pre-pass fails there is nothing to classify on, and both budgets collapse onto the
+**smallest** cap that is set: conservative by design, since the alternative is letting a failed
+listing produce an unbounded run.
 
 ### monitor (`actions/monitor/monitor.sh`)
 
@@ -80,8 +89,10 @@ produce a record; that guarantee is regression-tested at every layer.
 
 `issued | renewed | forced | skipped | failed | not_delegated | deferred`.
 
-`deferred` means the run's `max-renewals-per-run` budget was spent before the zone was reached:
-it was **not evaluated**, it is still due, and the next run takes it. It is a healthy state, not
+`deferred` means the budget for that zone's class was spent before the zone was reached: it was
+**not evaluated**, it is still due, and the next run takes it. Which budget applies is derivable
+from the record — a deferred renewal carries a validity window, a deferred first issuance has
+none. It is a healthy state, not
 a finding — but note what that does and does not mean for the monitor:
 
 - The monitor is **action-blind for the SLO**. It never branches on `deferred`; it keys on
@@ -93,7 +104,7 @@ a finding — but note what that does and does not mean for the monitor:
 - The flip side is that a cap **deliberately holds certificates past their renewal point**,
   which is precisely what the SLO measures. A cap sized too small for the wave therefore trips
   the monitor's `WARNING` while draining. The warden predicts that and annotates the run; the
-  sizing rule is in [reference-usage.md](reference-usage.md#pacing-a-large-fleet-max-renewals-per-run).
+  sizing rule is in [reference-usage.md](reference-usage.md#sizing-the-renewal-cap).
 
 Adding `deferred` was a **minor** bump: no consumer branches on the action except to recognise
 `failed` and `not_delegated`, and a `deferred` record is deliberately neither. A consumer that

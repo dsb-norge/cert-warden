@@ -66,6 +66,26 @@ setup() {
 # An explicit 0 is the shape EVERY real run sends: the composite action defaults
 # max-renewals-per-run to "0", so CERT_MAX_RENEWALS_PER_RUN is always set, never unset. The
 # unset default above is only reachable by running the script standalone.
+@test "loadConfig: the onboarding budget is separate and defaults to unlimited" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${maxRenewalsPerRun}" -eq 3 ]
+  [ "${maxNewIssuancePerRun}" -eq 0 ] # capping renewals must NOT cap onboarding
+
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="9"
+  loadConfig
+  [ "${maxRenewalsPerRun}" -eq 3 ]
+  [ "${maxNewIssuancePerRun}" -eq 9 ]
+}
+
+@test "loadConfig: an unparsable onboarding budget fails the run loudly" {
+  run bash -c "set -euo pipefail; export CERT_MAX_NEW_ISSUANCE_PER_RUN='lots'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  assert_output --partial "CERT_MAX_NEW_ISSUANCE_PER_RUN must be a non-negative integer"
+  refute_output --partial "REACHED"
+}
+
 @test "loadConfig: an explicit cap of 0 means unlimited, exactly like unset" {
   export CERT_MAX_RENEWALS_PER_RUN="0"
   source "${WARDEN_SH}"
@@ -600,7 +620,7 @@ deferred_record() {
   assert_success
   assert_output --partial "::warning::"
   assert_output --partial "CERT_MAX_RENEWALS_PER_RUN=3 is too small"
-  assert_output --partial "Draining 51 deferred certificate(s) at 2 run(s)/day takes ~8.5 days"
+  assert_output --partial "Draining 51 deferred renewal(s) at 2 run(s)/day takes ~8.5 days"
   assert_output --partial "warn threshold (0.30)"
   # 51 certificates, ~3 days of margin, 2 runs/day => 9 per run.
   assert_output --partial "Raise the cap to 9"
@@ -684,4 +704,98 @@ deferred_record() {
   run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
   refute_output --partial "::warning::"
   assert_success
+}
+
+# --- run pacing: which budget a zone draws on -------------------------------------------------
+# A zone's class is "does the vault already hold a certificate for it". That is what keeps a
+# renewal wave from holding up a first issuance: the two classes never share an allowance.
+
+@test "zoneBudgetFor sends certified zones to the renewal budget and the rest to onboarding" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="9"
+  source "${WARDEN_SH}"
+  loadConfig
+  zoneClassificationAvailable=true
+  zoneCertNotAfter=(["has-cert.example.test"]="2026-10-01T00:00:00+00:00")
+  certificateRenewalCount=1
+  certificateIssuanceCount=4
+
+  run zoneBudgetFor "has-cert.example.test"
+  assert_output "renewal 1 3"
+  run zoneBudgetFor "brand-new.example.test"
+  assert_output "onboarding 4 9"
+}
+
+# THE property this whole change exists for: an exhausted renewal budget must leave onboarding
+# untouched, so a developer waiting on a first certificate is never queued behind a wave.
+@test "zoneBudgetFor: an exhausted renewal budget does not block onboarding" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  zoneClassificationAvailable=true
+  zoneCertNotAfter=(["old.example.test"]="2026-10-01T00:00:00+00:00")
+  certificateRenewalCount=3 # renewal budget fully spent
+  certificateIssuanceCount=0
+
+  run zoneBudgetFor "old.example.test"
+  assert_output "renewal 3 3" # spent >= limit -> the caller defers this one
+  run zoneBudgetFor "new.example.test"
+  assert_output "onboarding 0 0" # limit 0 = unlimited -> issued regardless of the wave
+}
+
+@test "zoneBudgetFor collapses to the smallest cap when classification is unavailable" {
+  # A failed pre-pass leaves nothing to classify on. Collapsing onto the SMALLEST cap that is set
+  # can defer more than strictly necessary, but it can never turn the failure into the unbounded
+  # multi-hour run the caps exist to prevent.
+  export CERT_MAX_RENEWALS_PER_RUN="7"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="2"
+  source "${WARDEN_SH}"
+  loadConfig
+  zoneClassificationAvailable=false
+  certificateRenewalCount=1
+  certificateIssuanceCount=1
+
+  run zoneBudgetFor "anything.example.test"
+  assert_output "combined 2 2" # spend is pooled, limit is min(7, 2)
+
+  # Only one cap set -> that one governs everything.
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="0"
+  loadConfig
+  zoneClassificationAvailable=false
+  certificateRenewalCount=0
+  certificateIssuanceCount=0
+  run zoneBudgetFor "anything.example.test"
+  assert_output "combined 0 7"
+
+  # Neither cap set -> unlimited, exactly as before the feature existed.
+  export CERT_MAX_RENEWALS_PER_RUN="0"
+  loadConfig
+  zoneClassificationAvailable=false
+  run zoneBudgetFor "anything.example.test"
+  assert_output "combined 0 0"
+}
+
+# The guard polices the RENEWAL budget. Onboarding zones carry no validity window, cannot sink the
+# monitor's SLO, and must not inflate the drain estimate — before the split they did, which would
+# have produced a warning about a backlog that was not actually renewal work.
+@test "warnIfCapCannotDrain ignores deferred onboarding zones when sizing the drain" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=()
+  # 6 deferred renewals: 2 runs at cap 3, well inside the margin -> silent.
+  local i
+  for i in $(seq 1 6); do recs+=("$(deferred_record "r${i}.example.test" 90 61)"); done
+  # 40 deferred onboarding zones. Pooled with the renewals these would read as a 46-strong
+  # backlog (~8 days) and warn.
+  for i in $(seq 1 40); do
+    recs+=("$(jq -n -c --arg z "n${i}.example.test" \
+      '{zone:$z, kv_cert_name:("le-cert-staging-" + $z), action:"deferred",
+        days_to_expiry:null, lifetime_fraction_remaining:null, error:""}')")
+  done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
 }

@@ -566,8 +566,9 @@ jobs:
           SWEEP_DELETED: ${{ steps.sweeper.outputs.deleted-count }}
           SWEEP_JSON: ${{ steps.sweeper.outputs.candidates-json }}
         run: |
-          # zones-deferred must be a real 0, not empty: the smoke sets no cap, and a caller
-          # gating on it has to be able to tell "nothing deferred" from "output not wired".
+          # zones-deferred must be a real 0, not empty: the smoke leaves both budgets at their
+          # "0 = unlimited" defaults, and a caller gating on this output has to be able to tell
+          # "nothing deferred" from "output not wired".
           [[ "${WARDEN_TOTAL}" == "1" && "${WARDEN_MANAGED}" == "0" && "${WARDEN_DEFERRED}" == "0" ]] || {
             echo "::error::warden outputs unexpected: total=${WARDEN_TOTAL} managed=${WARDEN_MANAGED} deferred=${WARDEN_DEFERRED}"
             exit 1

@@ -274,94 +274,70 @@ JSON
   assert_output "forced"
 }
 
-@test "e2e-9 renewal cap: forcing respects the budget, and the next run drains the rest" {
-  # Runs against the chaos-configured Pebble from e2e-7/8 (cw-test.internal holds a valid cert;
-  # zone2 was dropped in e2e-4 and never re-issued, so it needs a fresh certificate).
+@test "e2e-9 renewal budget: forcing respects it, and deferred renewals keep their window" {
+  # Runs against the chaos-configured Pebble from e2e-7/8. Both zones must hold a certificate for
+  # this scenario, since the renewal budget only governs zones that already have one — so start
+  # with an uncapped run to bring zone2 (dropped back in e2e-4) into service.
   cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
 [
   {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
   {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
 ]
 JSON
+  run_warden
+  assert_success
+  [ -f "${CW_STATE}/certs/le-cert-staging-cw-test-internal-pfx.json" ]
+  [ -f "${CW_STATE}/certs/le-cert-staging-zone2-cw-test-internal-pfx.json" ]
 
-  # Budget of one, with force-renewal on: exactly the case that must not run away, since a
-  # forced renewal of a whole environment is how a fleet ends up renewing in a single wave.
+  # Now both are renewals. Budget of one with force-renewal on: exactly the case that must not
+  # run away, since a forced renewal of a whole environment is how a fleet ends up renewing in a
+  # single wave in the first place.
   : >"${CW_STATE}/calls.log"
   CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
   assert_success
-  assert_output --partial "Renewal budget for this run: 1"
+  assert_output --partial "renewals=1"
   assert_output --partial "Renewal budget spent (1/1)"
-
-  # cw-test.internal has a certificate and therefore an expiry; zone2 has none, so it sorts
-  # last (nothing is in service for it that could expire) and is the one deferred.
-  run jq -r 'map({(.zone): .action}) | add | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
-  assert_output "forced
-deferred"
-
-  # The deferred zone was not evaluated at all — that is where the hours are saved. Not one
-  # Azure call names it: no record-set listing, no certificate download, so no `lego run` and
-  # none of lego's random renewal delay. And it is not an error, so it must carry none.
-  run grep -c "zone2" "${CW_STATE}/calls.log"
-  assert_output "0"
-  run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .error' "${METRICS_OUT}"
-  assert_output ""
-
-  # A deferred record still names its Key Vault object, so the monitor keeps counting it as a
-  # managed certificate rather than losing sight of it.
-  run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .kv_cert_name' "${METRICS_OUT}"
-  assert_output "le-cert-staging-zone2-cw-test-internal-pfx"
-
-  # Next run, same cap, no force: the freshly forced cert is not due (ARI says so), that costs
-  # nothing against the budget, and the deferred zone is picked up. No state carried over —
-  # dueness alone got us here.
-  CERT_MAX_RENEWALS_PER_RUN=1 run_warden
-  assert_success
-  run jq -r 'map({(.zone): .action}) | add | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
-  assert_output "skipped
-issued"
-
-  # Third run: force again, now that BOTH zones hold a certificate. This is the case the whole
-  # design turns on — a deferred zone with a certificate in the vault must carry that
-  # certificate's real validity window, because lifetime_fraction_remaining is the monitor's SLO
-  # input and a null there would drop the zone out of the alert entirely. The cap would then look
-  # like a success precisely while hiding a backlog that had stopped draining.
-  CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
-  assert_success
-  # Freshly issued, so the cap can comfortably drain it: the sizing guard stays quiet. Asserted
-  # here, before any other `run` overwrites $output with its own (pitfall: `run` is the capture).
+  # A correctly sized cap says nothing; these certificates are minutes old.
   refute_output --partial "::warning::"
 
-  # Deliberately NOT asserting WHICH zone is deferred. Both certificates are minutes old here,
-  # so the urgency order between them rests on a wall-clock difference this shared-state chain
-  # does not control; CI has produced both orders. Ordering itself is pinned deterministically,
-  # with controlled expiry fixtures, in tests/unit/warden.bats. What this scenario is for is the
-  # budget split and the window — one zone mutates, one is deferred:
-  # `as $x |` bindings, not `a, b`: in jq `|` binds looser than `,`, so `A | length, (B)` would
-  # evaluate B against A's result instead of the input (pitfall P-23).
+  # One forced, one deferred. Which one is deliberately not asserted: both certificates are
+  # minutes old, so the urgency order between them rests on a wall-clock gap this shared-state
+  # chain does not control. Ordering is pinned deterministically, with controlled expiry
+  # fixtures, in tests/unit/warden.bats.
   run jq -r '([.[] | select(.action == "forced")] | length) as $forced
     | ([.[] | select(.action == "deferred")] | length) as $deferred
     | "\($forced) \($deferred)"' "${METRICS_OUT}"
   assert_output "1 1"
 
-  # THE property the design turns on: the deferred zone HOLDS a certificate, so its record must
-  # report that certificate's real validity window — only the Key Vault pre-pass can supply it,
-  # and a null would drop the zone out of the monitor's SLO. Order-agnostic on purpose, and
-  # strictly stronger for it: if the pre-pass ever failed to match a certified zone to its
-  # certificate, that zone would sort last as "uncertified" AND report a null window here.
-  run jq -e '
-    [.[] | select(.action == "deferred")] | length == 1 and (.[0]
+  # THE property the design turns on: the deferred zone holds a certificate, so its record must
+  # carry that certificate's real validity window. Only the Key Vault pre-pass can supply it, and
+  # a null would drop the zone out of the monitor's SLO — the cap would look like a success while
+  # hiding a backlog that had stopped draining.
+  run jq -e '[.[] | select(.action == "deferred")] | length == 1 and (.[0]
       | .days_to_expiry != null
         and .lifetime_fraction_remaining != null
         and .lifetime_fraction_remaining > 0.9
-        and .not_after != "")
-  ' "${METRICS_OUT}"
+        and .not_after != "")' "${METRICS_OUT}"
   assert_success
 
-  # Fourth run: the wave has drained, so the cap has nothing left to defer and says nothing.
-  CERT_MAX_RENEWALS_PER_RUN=1 run_warden
+  # The deferred zone was not evaluated at all — that is where the hours are saved. Its Key Vault
+  # object is named in the metrics, but no `az` call this run went near it.
+  deferredZone="$(jq -r '.[] | select(.action == "deferred") | .zone' "${METRICS_OUT}")"
+  run grep -c "${deferredZone}" "${CW_STATE}/calls.log"
+  assert_output "0"
+
+  # The budget holds across runs: force again and exactly one still moves.
+  CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
   assert_success
-  refute_output --partial "Renewal budget spent"
-  refute_output --partial "::warning::"
+  run jq -r '([.[] | select(.action == "forced")] | length) as $forced
+    | ([.[] | select(.action == "deferred")] | length) as $deferred
+    | "\($forced) \($deferred)"' "${METRICS_OUT}"
+  assert_output "1 1"
+
+  # Lift the cap and nothing is deferred: both are freshly renewed, so ARI skips them.
+  run_warden
+  assert_success
+  refute_output --partial "budget spent"
   run jq -r '[.[] | select(.action == "deferred")] | length' "${METRICS_OUT}"
   assert_output "0"
 }
@@ -395,11 +371,10 @@ JSON
   assert_output "0"
 }
 
-@test "e2e-11 a new issuance spends the budget too, and defers what follows" {
-  # The budget counts MUTATIONS, not renewals: issuing a first certificate for a brand-new zone
-  # costs exactly as much as renewing an existing one. e2e-9 proves that for `forced`; this
-  # proves it for `issued`, which is the case a consumer hits whenever zones are added to an
-  # environment that is already pacing a renewal wave.
+@test "e2e-11 onboarding budget: it paces first issuance and drains across runs" {
+  # The onboarding budget governs zones with no certificate. This is the prod shape — batching a
+  # not-yet-issued environment — and the one place a backlog genuinely drains, because an issued
+  # zone stops being uncertified and leaves the queue for good.
   cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
 [
   {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
@@ -411,9 +386,10 @@ JSON
     "${CW_STATE}"/secrets/le-cert-staging-*-pfx \
     "${CW_STATE}"/secrets/le-cert-staging-*-pfx-meta
 
-  CERT_MAX_RENEWALS_PER_RUN=1 run_warden
+  CERT_MAX_NEW_ISSUANCE_PER_RUN=1 run_warden
   assert_success
-  assert_output --partial "Renewal budget spent (1/1)"
+  assert_output --partial "new issuance=1"
+  assert_output --partial "Onboarding budget spent (1/1)"
 
   # One issued, one deferred — the issuance consumed the whole budget. Order-agnostic: with no
   # certificates anywhere there is no urgency to order by (see e2e-9's note).
@@ -424,16 +400,67 @@ JSON
 
   # The deferred zone has NO certificate, so a null window is the honest answer here — the
   # opposite of e2e-9's case, and the reason the monitor ignores nulls rather than alerting on
-  # them: nothing is in service for this zone that could expire.
+  # them: nothing is in service for this zone that could expire. It is also why the sizing guard
+  # stays silent no matter how long an onboarding backlog gets.
   run jq -e '[.[] | select(.action == "deferred")] | length == 1 and (.[0]
       | .days_to_expiry == null and .lifetime_fraction_remaining == null)' "${METRICS_OUT}"
   assert_success
 
-  # Next run picks up the zone that was deferred, and nothing is left over.
-  CERT_MAX_RENEWALS_PER_RUN=1 run_warden
+  # Next run picks up the zone that was deferred, and nothing is left over. Nothing was carried
+  # between runs to make that happen: the zone is simply still uncertified.
+  CERT_MAX_NEW_ISSUANCE_PER_RUN=1 run_warden
   assert_success
   run jq -r '([.[] | select(.action == "issued")] | length) as $issued
     | ([.[] | select(.action == "deferred")] | length) as $deferred
     | "\($issued) \($deferred)"' "${METRICS_OUT}"
   assert_output "1 0"
+}
+
+@test "e2e-12 separate budgets: an exhausted renewal budget does not hold up a first issuance" {
+  # THE property the two-budget split exists for. cw-test.internal holds a certificate (so it can
+  # only renew) and zone2 holds none (so it can only be issued). Force a renewal with the renewal
+  # budget set to zero-headroom and onboarding left unlimited: the wave is paced, the newly added
+  # zone is NOT — a developer waiting on a first certificate never queues behind a renewal
+  # backlog, which is exactly what a single shared budget did.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # cw-test keeps its certificate from e2e-11; drop zone2's so it needs a first issuance.
+  rm -f "${CW_STATE}/certs/le-cert-staging-zone2-cw-test-internal-pfx.json" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx-meta"
+
+  # Renewal budget already spent by the first zone; onboarding unlimited.
+  CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  assert_output --partial "new issuance=unlimited"
+
+  run jq -r 'map({(.zone): .action}) | add
+    | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "forced
+issued"
+  # Nothing deferred: the two classes drew on different allowances.
+  run jq -r '[.[] | select(.action == "deferred")] | length' "${METRICS_OUT}"
+  assert_output "0"
+
+  # And the mirror image: cap onboarding, leave renewals unlimited. This is the prod
+  # first-issuance shape — pace the onboarding wave without touching maintenance.
+  rm -f "${CW_STATE}/certs/le-cert-staging-zone2-cw-test-internal-pfx.json" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx-meta"
+
+  CERT_MAX_NEW_ISSUANCE_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  assert_output --partial "renewals=unlimited"
+  run jq -r 'map({(.zone): .action}) | add
+    | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "forced
+issued"
+
+  # An onboarding backlog is never an alerting matter, so the sizing guard stays silent even
+  # though the onboarding budget was fully spent.
+  refute_output --partial "::warning::"
 }

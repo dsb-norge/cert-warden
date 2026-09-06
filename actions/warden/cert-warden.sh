@@ -23,13 +23,14 @@
 #     - LE_ENVIRONMENT_NAME:  Let's Encrypt environment to use, either "staging" or "production" (default: "staging")
 #     - CERT_FORCE_ALL_NEW:   If set to "true", forces new certificates for all DNS zones (default: "false")
 #     - CERT_FORCE_RENEWAL:   If set to "true", forces renewal of existing certificates (default: "false")
-#     - CERT_MAX_RENEWALS_PER_RUN: Maximum number of certificates this run may renew or force,
-#                             i.e. zones the vault already holds a certificate for. Further due
-#                             certificates are recorded as "deferred" and left for the next run.
-#                             0 or unset means unlimited (default: 0)
+#     - CERT_MAX_RENEWALS_PER_RUN: How many certificates this run may renew or force, i.e. zones
+#                             the vault already holds a certificate for. "none", "unlimited"
+#                             (default, also when unset) or a positive integer. Anything beyond
+#                             the budget is recorded "deferred" and left for the next run.
+#                             NOTE "0" is rejected as ambiguous -- write "none" or "unlimited".
 #     - CERT_MAX_NEW_ISSUANCE_PER_RUN: The same, for zones with NO certificate yet (onboarding).
-#                             Separate budget: a renewal wave never holds up a first issuance.
-#                             0 or unset means unlimited (default: 0)
+#                             Separate budget: a renewal wave never holds up a first issuance,
+#                             and "none" on one class does not affect the other.
 #   Test seams (NOT supported for production use — defaults are production behaviour; see docs/contracts.md):
 #     - CW_ACME_DIRECTORY_URL:  Override the ACME directory URL (default: derived from LE_ENVIRONMENT_NAME)
 #     - CW_LEGO_DNS_PROVIDER:   lego DNS-01 provider (default: "azuredns"; tests use "exec")
@@ -88,8 +89,7 @@ function loadConfig() {
   # ------------------------------------------------------------
 
   # TWO budgets, because the run has two kinds of work that differ by 3-5x in wall clock and
-  # entirely in urgency. Zero (or unset) is unlimited on either, which is the historical
-  # behaviour.
+  # entirely in urgency. Each is `none`, `unlimited` (the default) or a positive integer.
   #
   #   maxRenewalsPerRun     zones the vault ALREADY holds a certificate for (renewed/forced)
   #   maxNewIssuancePerRun  zones it does not (first issuance -- "onboarding")
@@ -111,18 +111,15 @@ function loadConfig() {
   # is a person waiting on a deploy rather than a certificate at risk. Separate budgets size each
   # class to its own cost, and neither class can starve the other.
   #
-  # A typo must not silently read as "unlimited" -- that is exactly the multi-hour run the cap is
-  # there to prevent -- so an unparsable value fails the run instead.
-  maxRenewalsPerRun=${CERT_MAX_RENEWALS_PER_RUN:-0}
-  if ! [[ "${maxRenewalsPerRun}" =~ ^[0-9]+$ ]]; then
-    log-error "CERT_MAX_RENEWALS_PER_RUN must be a non-negative integer ('0' or unset = unlimited), got: '${maxRenewalsPerRun}'"
-    exit 1
-  fi
-  maxNewIssuancePerRun=${CERT_MAX_NEW_ISSUANCE_PER_RUN:-0}
-  if ! [[ "${maxNewIssuancePerRun}" =~ ^[0-9]+$ ]]; then
-    log-error "CERT_MAX_NEW_ISSUANCE_PER_RUN must be a non-negative integer ('0' or unset = unlimited), got: '${maxNewIssuancePerRun}'"
-    exit 1
-  fi
+  # Each budget is `none`, `unlimited` (the default), or a positive integer -- see
+  # normalizeBudget for why the words rather than magic numbers, and why `0` is an error.
+  # `none` is what lets a caller steer the two classes per trigger: a deploy-triggered run can
+  # onboard new zones while renewing nothing, keeping renewals on a schedule the caller controls.
+  local _budget
+  _budget="$(normalizeBudget "${CERT_MAX_RENEWALS_PER_RUN:-}" CERT_MAX_RENEWALS_PER_RUN)"
+  read -r renewalBudgetMode maxRenewalsPerRun <<<"${_budget}"
+  _budget="$(normalizeBudget "${CERT_MAX_NEW_ISSUANCE_PER_RUN:-}" CERT_MAX_NEW_ISSUANCE_PER_RUN)"
+  read -r newIssuanceBudgetMode maxNewIssuancePerRun <<<"${_budget}"
 
   # Inputs to the sizing guard (see warnIfCapCannotDrain), which polices the RENEWAL budget only:
   # a deferred renewal sinks towards the monitor's threshold, whereas a deferred onboarding zone
@@ -301,6 +298,75 @@ function letsencryptAccountExistsInKeyVault() {
   else
     return 1 # false
   fi
+}
+
+# Normalise one budget input to "<mode> <limit>".
+#
+#   mode `unlimited`  no cap on this class (the default; limit is meaningless)
+#   mode `none`       act on nothing of this class this run (limit is meaningless)
+#   mode `capped`     act on at most <limit>
+#
+# Accepted: `none`, `unlimited`, empty/unset (= unlimited), or a positive integer. Case and
+# surrounding whitespace are ignored, because these arrive through GitHub Actions expressions.
+#
+# `0` is REJECTED, deliberately, rather than mapped to either meaning. It is the one value with a
+# genuinely split reading -- "max zero" says none to most people, while this suite's first draft
+# used it for unlimited -- and the two readings fail in opposite directions. Guessing wrong in the
+# "none" direction silently stops certificate renewal across an environment: no error, no failed
+# zone, a green run, and nothing to notice until the monitor's lifetime SLO sinks days later. A
+# hard error costs one line in a caller and cannot be misread.
+#
+# Negative numbers are rejected for the same reason. `-1` conventionally means "no limit" in
+# other software, which is the opposite of what anyone would intend it to mean here.
+#
+# Errors go to STDERR: this function is called through command substitution, so anything on
+# stdout is captured into the caller's variable instead of being shown (pitfall P-22, stdout
+# overload). `set -e` + inherit_errexit turns the exit into a failed assignment, which stops the
+# run -- an unparsable budget must never silently read as "unlimited".
+# Arguments:
+#   1: raw value
+#   2: variable name, for the error message
+# Returns:
+#   Prints "<mode> <limit>" on stdout; exits 1 on an invalid value.
+function normalizeBudget() {
+  local _raw="${1:-}" _varName="${2:-budget}"
+  local _value="${_raw,,}"
+  _value="${_value//[[:space:]]/}"
+
+  case "${_value}" in
+    "" | unlimited)
+      echo "unlimited 0"
+      ;;
+    none)
+      echo "none 0"
+      ;;
+    0)
+      log-error "${_varName}='0' is ambiguous and is not accepted: write 'none' to act on nothing of this class, or 'unlimited' (or leave it unset) for no cap." >&2
+      exit 1
+      ;;
+    *)
+      if [[ "${_value}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "capped ${_value}"
+      else
+        log-error "${_varName} must be 'none', 'unlimited' or a positive integer, got: '${_raw}'" >&2
+        exit 1
+      fi
+      ;;
+  esac
+}
+
+# Render a budget back as the word an operator would have written, for logs and the step summary.
+# Deliberately words rather than numbers: a run that renewed nothing ON PURPOSE and a run that
+# renewed nothing because something broke must never read the same in a log.
+# Arguments:
+#   1: mode (none|unlimited|capped)
+#   2: limit
+function describeBudget() {
+  case "${1}" in
+    none) echo "none" ;;
+    capped) echo "${2}" ;;
+    *) echo "unlimited" ;;
+  esac
 }
 
 # Key Vault certificate object name for a zone: le-cert-<le-env>-<zone-with-dashes>-pfx.
@@ -547,33 +613,45 @@ function resolveZoneProcessingOrder() {
 # either way: lego skips its pre-renewal sleep when the domain set changed.)
 #
 # Degraded mode: if the pre-pass could not list the vault, nothing distinguishes the classes, so
-# both collapse onto the SMALLEST cap that is set. That is deliberately the conservative choice --
-# it can defer more than strictly necessary, but it can never turn a failed listing into the
-# unbounded multi-hour run the caps exist to prevent.
+# both collapse onto the MOST RESTRICTIVE of the two (none beats a cap, a cap beats unlimited, and
+# two caps collapse to the smaller). That is deliberately conservative -- it can act on less than
+# strictly necessary, but it can never turn a failed listing into the unbounded multi-hour run the
+# caps exist to prevent. The caller announces it, because a run that does nothing on purpose and a
+# run that does nothing by accident must not look alike.
 # Arguments:
 #   1: DNS zone name
 # Returns:
-#   Prints "<class> <spent> <budget>" -- class is `renewal` or `onboarding` (`combined` when
-#   degraded), budget 0 meaning unlimited.
-# Uses globals: zoneClassificationAvailable, zoneCertNotAfter, maxRenewalsPerRun,
-#               maxNewIssuancePerRun, certificateRenewalCount, certificateIssuanceCount
+#   Prints "<class> <mode> <spent> <limit>" -- class is `renewal` or `onboarding` (`combined` when
+#   degraded); mode is none|unlimited|capped; limit is meaningful only when capped.
+# Uses globals: zoneClassificationAvailable, zoneCertNotAfter, renewalBudgetMode,
+#               newIssuanceBudgetMode, maxRenewalsPerRun, maxNewIssuancePerRun,
+#               certificateRenewalCount, certificateIssuanceCount
 function zoneBudgetFor() {
   local _zoneName="$1"
 
   if [ "${zoneClassificationAvailable}" != true ]; then
-    local _combined="${maxRenewalsPerRun}"
-    if [ "${maxNewIssuancePerRun}" -gt 0 ] &&
-      { [ "${_combined}" -eq 0 ] || [ "${maxNewIssuancePerRun}" -lt "${_combined}" ]; }; then
-      _combined="${maxNewIssuancePerRun}"
+    local _mode="unlimited" _limit=0
+    if [ "${renewalBudgetMode}" = none ] || [ "${newIssuanceBudgetMode}" = none ]; then
+      _mode="none"
+    elif [ "${renewalBudgetMode}" = capped ] && [ "${newIssuanceBudgetMode}" = capped ]; then
+      _mode="capped"
+      _limit="${maxRenewalsPerRun}"
+      [ "${maxNewIssuancePerRun}" -lt "${_limit}" ] && _limit="${maxNewIssuancePerRun}"
+    elif [ "${renewalBudgetMode}" = capped ]; then
+      _mode="capped"
+      _limit="${maxRenewalsPerRun}"
+    elif [ "${newIssuanceBudgetMode}" = capped ]; then
+      _mode="capped"
+      _limit="${maxNewIssuancePerRun}"
     fi
-    echo "combined $((certificateRenewalCount + certificateIssuanceCount)) ${_combined}"
+    echo "combined ${_mode} $((certificateRenewalCount + certificateIssuanceCount)) ${_limit}"
     return 0
   fi
 
   if [ -n "${zoneCertNotAfter[${_zoneName}]:-}" ]; then
-    echo "renewal ${certificateRenewalCount} ${maxRenewalsPerRun}"
+    echo "renewal ${renewalBudgetMode} ${certificateRenewalCount} ${maxRenewalsPerRun}"
   else
-    echo "onboarding ${certificateIssuanceCount} ${maxNewIssuancePerRun}"
+    echo "onboarding ${newIssuanceBudgetMode} ${certificateIssuanceCount} ${maxNewIssuancePerRun}"
   fi
 }
 
@@ -659,8 +737,9 @@ function recordCertMetric() {
 # a 90-day certificate are judged alike, exactly as in the monitor). If the drain is slower than
 # the most urgent deferred certificate can wait, name the cap that would have fitted.
 #
-# Silent unless the renewal cap is set AND a renewal was actually deferred: a correctly sized cap
-# says nothing at all, and an onboarding backlog is not an alerting matter.
+# Silent unless the renewal budget is an actual CAP and a renewal was deferred: a correctly sized
+# cap says nothing, a suppressed (`none`) budget is a deliberate choice rather than a size, and an
+# onboarding backlog is not an alerting matter.
 # Arguments:
 #   1: path to this run's metrics artifact (JSON array)
 # Returns:
@@ -668,7 +747,13 @@ function recordCertMetric() {
 # Uses globals: maxRenewalsPerRun, wardenRunsPerDay, monitorWarnThreshold
 function warnIfCapCannotDrain() {
   local _metricsPath="$1"
-  [ "${maxRenewalsPerRun}" -gt 0 ] || return 0
+  # Only a CAP can be mis-sized. `unlimited` has nothing to drain slowly, and `none` has nothing
+  # to drain at all: with renewals suppressed the backlog never shrinks, so the drain estimate is
+  # infinite and this would warn on EVERY such run -- which is precisely the alert churn the
+  # guard exists to prevent. A caller deliberately keeping renewals off one trigger is not a
+  # misconfiguration; the monitor's lifetime SLO remains the backstop either way, because the
+  # zones this run suppressed are still recorded with their real validity window.
+  [ "${renewalBudgetMode}" = capped ] || return 0
 
   # Deferred RENEWALS only. An onboarding zone deferred by the other budget does not drain via
   # this one and has no certificate in service to sink, so counting it here would inflate the
@@ -1043,9 +1128,15 @@ function main() {
   # pre-pass runs only when one is set -- an uncapped run keeps enumeration order and makes no
   # extra Azure calls, which is what keeps "no cap set" identical to the behaviour before it
   # existed, artifact record order included.
-  if [ "${maxRenewalsPerRun}" -gt 0 ] || [ "${maxNewIssuancePerRun}" -gt 0 ]; then
-    log-info "Budget for this run: renewals=$([ "${maxRenewalsPerRun}" -gt 0 ] && echo "${maxRenewalsPerRun}" || echo unlimited), new issuance=$([ "${maxNewIssuancePerRun}" -gt 0 ] && echo "${maxNewIssuancePerRun}" || echo unlimited)"
+  # `none` needs the pre-pass every bit as much as a cap does: it is what tells the two classes
+  # apart, AND what gives the zones it suppresses a real validity window in the metrics -- which
+  # is the whole reason suppressing renewals stays visible to the monitor.
+  log-info "Budget for this run: renewals=$(describeBudget "${renewalBudgetMode}" "${maxRenewalsPerRun}"), new issuance=$(describeBudget "${newIssuanceBudgetMode}" "${maxNewIssuancePerRun}")"
+  if [ "${renewalBudgetMode}" != unlimited ] || [ "${newIssuanceBudgetMode}" != unlimited ]; then
     resolveZoneProcessingOrder
+    if [ "${zoneClassificationAvailable}" != true ] && [ "${renewalBudgetMode}" != "${newIssuanceBudgetMode}" ]; then
+      log-warn "Renewal and onboarding budgets differ but the zones could not be classified; both fall back to the most restrictive of the two for this run"
+    fi
   else
     mapfile -t zoneProcessingOrder < <(echo "${publicZonesJson}" | jq -r '.[].name')
   fi
@@ -1093,10 +1184,16 @@ function main() {
       # `force-renewal` dispatch re-issuing an entire environment is one of the ways a fleet ends
       # up renewing in one wave in the first place. An operator who really does want everything
       # at once expresses it by leaving the cap unset.
-      read -r zoneClass zoneBudgetSpent zoneBudgetLimit < <(zoneBudgetFor "${zoneName}")
-      if [ "${zoneBudgetLimit}" -gt 0 ] && [ "${zoneBudgetSpent}" -ge "${zoneBudgetLimit}" ]; then
+      read -r zoneClass zoneBudgetMode zoneBudgetSpent zoneBudgetLimit < <(zoneBudgetFor "${zoneName}")
+      zoneDeferReason=""
+      if [ "${zoneBudgetMode}" = none ]; then
+        zoneDeferReason="${zoneClass} budget is 'none' this run"
+      elif [ "${zoneBudgetMode}" = capped ] && [ "${zoneBudgetSpent}" -ge "${zoneBudgetLimit}" ]; then
+        zoneDeferReason="${zoneClass} budget spent (${zoneBudgetSpent}/${zoneBudgetLimit})"
+      fi
+      if [ -n "${zoneDeferReason}" ]; then
         certKvPfxSecretName="$(zoneCertKvSecretName "${zoneName}")"
-        log-info "  ${zoneClass^} budget spent (${zoneBudgetSpent}/${zoneBudgetLimit}), deferring ${zoneName} to the next run"
+        log-info "  ${zoneDeferReason}, deferring ${zoneName} to the next run"
         recordCertMetric "deferred" "-" "" \
           "${zoneCertNotBefore[${zoneName}]:-}" "${zoneCertNotAfter[${zoneName}]:-}"
         continue # to next zone
@@ -1364,6 +1461,9 @@ function main() {
   metricsDeferredNew=$((metricsDeferred - metricsDeferredRenewals))
   metricsMinFraction=$(jq '[.[] | .lifetime_fraction_remaining // empty] | if length > 0 then min else null end' "${certMetricsOutputFile}")
   log-info "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} deferred=${metricsDeferred} (renewals=${metricsDeferredRenewals} new=${metricsDeferredNew}) min_lifetime_fraction=${metricsMinFraction}"
+  if [ "${renewalBudgetMode}" = none ]; then
+    log-info "  Renewals were suppressed for this run by design (max-renewals-per-run: none); ${metricsDeferredRenewals} zone(s) left for a run that permits them."
+  fi
 
   # Deferring is healthy; deferring FASTER THAN THE FLEET CAN AFFORD is not. Say so on the run.
   warnIfCapCannotDrain "${certMetricsOutputFile}"
@@ -1374,6 +1474,12 @@ function main() {
       echo "## Cert Warden — \`${letsencryptEnvironment}\` run summary"
       echo ""
       echo "zones: **${metricsTotal}** · managed: **${metricsManaged}** · failed: **${metricsFailed}** · deferred: **${metricsDeferred}** (${metricsDeferredRenewals} renewal / ${metricsDeferredNew} new) · min lifetime remaining: **${metricsMinFraction}**"
+      echo ""
+      echo "budgets — renewals: \`$(describeBudget "${renewalBudgetMode}" "${maxRenewalsPerRun}")\` · new issuance: \`$(describeBudget "${newIssuanceBudgetMode}" "${maxNewIssuancePerRun}")\`"
+      if [ "${renewalBudgetMode}" = none ]; then
+        echo ""
+        echo "> Renewals were **suppressed for this run by design**. ${metricsDeferredRenewals} zone(s) are waiting for a run that permits them."
+      fi
       echo ""
       echo "| zone | action | days to expiry | lifetime % left | key type | error |"
       echo "| --- | --- | ---: | ---: | --- | --- |"

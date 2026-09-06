@@ -366,10 +366,15 @@ issued"
   assert_output "0"
 }
 
-@test "e2e-10 no cap set: enumeration order and the artifact are untouched" {
-  # The compatibility guarantee. An uncapped run must make no Key Vault certificate listing at
-  # all and must keep Azure's enumeration order, so an existing consumer sees byte-identical
-  # behaviour down to the artifact's record order.
+@test "e2e-10 cap of 0: enumeration order and the artifact are untouched" {
+  # The compatibility guarantee, in the shape a real consumer sends it. An uncapped run must make
+  # no Key Vault certificate listing at all and must keep Azure's enumeration order, so an
+  # existing consumer sees byte-identical behaviour down to the artifact's record order.
+  #
+  # Deliberately an EXPLICIT 0 rather than an unset variable: the composite action defaults
+  # max-renewals-per-run to "0", so every run through the action sends the literal string, and
+  # that is the path a consumer opting out of the cap actually takes. Unset is covered too —
+  # e2e-1 through e2e-8 all run without the variable at all.
   cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
 [
   {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]},
@@ -377,8 +382,9 @@ issued"
 ]
 JSON
   : >"${CW_STATE}/calls.log"
-  run_warden
+  CERT_MAX_RENEWALS_PER_RUN=0 run_warden
   assert_success
+  refute_output --partial "Renewal budget for this run"
 
   # Record order follows the zone listing, NOT urgency.
   run jq -r '[.[].zone] | join(",")' "${METRICS_OUT}"
@@ -387,4 +393,47 @@ JSON
   # And the ordering pre-pass never ran.
   run grep -c "keyvault certificate list" "${CW_STATE}/calls.log"
   assert_output "0"
+}
+
+@test "e2e-11 a new issuance spends the budget too, and defers what follows" {
+  # The budget counts MUTATIONS, not renewals: issuing a first certificate for a brand-new zone
+  # costs exactly as much as renewing an existing one. e2e-9 proves that for `forced`; this
+  # proves it for `issued`, which is the case a consumer hits whenever zones are added to an
+  # environment that is already pacing a renewal wave.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # Both zones back to "never issued": neither has a certificate, so neither can renew.
+  rm -f "${CW_STATE}"/certs/le-cert-staging-*-pfx.json \
+    "${CW_STATE}"/secrets/le-cert-staging-*-pfx \
+    "${CW_STATE}"/secrets/le-cert-staging-*-pfx-meta
+
+  CERT_MAX_RENEWALS_PER_RUN=1 run_warden
+  assert_success
+  assert_output --partial "Renewal budget spent (1/1)"
+
+  # One issued, one deferred — the issuance consumed the whole budget. Order-agnostic: with no
+  # certificates anywhere there is no urgency to order by (see e2e-9's note).
+  run jq -r '([.[] | select(.action == "issued")] | length) as $issued
+    | ([.[] | select(.action == "deferred")] | length) as $deferred
+    | "\($issued) \($deferred)"' "${METRICS_OUT}"
+  assert_output "1 1"
+
+  # The deferred zone has NO certificate, so a null window is the honest answer here — the
+  # opposite of e2e-9's case, and the reason the monitor ignores nulls rather than alerting on
+  # them: nothing is in service for this zone that could expire.
+  run jq -e '[.[] | select(.action == "deferred")] | length == 1 and (.[0]
+      | .days_to_expiry == null and .lifetime_fraction_remaining == null)' "${METRICS_OUT}"
+  assert_success
+
+  # Next run picks up the zone that was deferred, and nothing is left over.
+  CERT_MAX_RENEWALS_PER_RUN=1 run_warden
+  assert_success
+  run jq -r '([.[] | select(.action == "issued")] | length) as $issued
+    | ([.[] | select(.action == "deferred")] | length) as $deferred
+    | "\($issued) \($deferred)"' "${METRICS_OUT}"
+  assert_output "1 0"
 }

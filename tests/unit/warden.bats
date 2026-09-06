@@ -63,6 +63,38 @@ setup() {
   [ "${monitorWarnThreshold}" = "0.30" ]
 }
 
+# An explicit 0 is the shape EVERY real run sends: the composite action defaults
+# max-renewals-per-run to "0", so CERT_MAX_RENEWALS_PER_RUN is always set, never unset. The
+# unset default above is only reachable by running the script standalone.
+@test "loadConfig: an explicit cap of 0 means unlimited, exactly like unset" {
+  export CERT_MAX_RENEWALS_PER_RUN="0"
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${maxRenewalsPerRun}" -eq 0 ]
+
+  # ... and 0 must switch OFF every part of the feature, not just the budget check: no sizing
+  # guard, whatever the artifact holds.
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  write_metrics_fixture "${metricsFile}" \
+    '{"zone":"a.example.test","kv_cert_name":"x","action":"deferred","days_to_expiry":1,"lifetime_fraction_remaining":0.01,"error":""}'
+  run warnIfCapCannotDrain "${metricsFile}"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+# A caller wiring the input from a matrix var that the entry omits renders an EMPTY string, not
+# a missing variable. That must read as unlimited too, never as a parse failure.
+@test "loadConfig: an empty cap reads as unlimited" {
+  export CERT_MAX_RENEWALS_PER_RUN=""
+  export CERT_RUNS_PER_DAY=""
+  export CERT_MONITOR_WARN_THRESHOLD=""
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${maxRenewalsPerRun}" -eq 0 ]
+  [ "${wardenRunsPerDay}" -eq 2 ]
+  [ "${monitorWarnThreshold}" = "0.30" ]
+}
+
 @test "loadConfig: the renewal cap and its sizing-guard inputs are configurable" {
   export CERT_MAX_RENEWALS_PER_RUN="5"
   export CERT_RUNS_PER_DAY="4"

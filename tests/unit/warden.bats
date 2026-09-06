@@ -55,88 +55,127 @@ setup() {
   [ "${digArgs}" = "@127.0.0.1 -p 5354" ]
 }
 
-@test "loadConfig: the renewal cap is unlimited by default" {
+@test "normalizeBudget accepts the vocabulary, in any case or spacing" {
+  source "${WARDEN_SH}"
+  run normalizeBudget "" X
+  assert_output "unlimited 0"
+  run normalizeBudget "unlimited" X
+  assert_output "unlimited 0"
+  run normalizeBudget "none" X
+  assert_output "none 0"
+  run normalizeBudget "3" X
+  assert_output "capped 3"
+  # These arrive through GitHub Actions expressions, so tolerate case and stray spacing.
+  run normalizeBudget " NONE " X
+  assert_output "none 0"
+  run normalizeBudget "Unlimited" X
+  assert_output "unlimited 0"
+}
+
+# `0` is the one value with a genuinely split reading, and the two readings fail in opposite
+# directions — guessing "none" silently stops renewal across an environment. It is rejected rather
+# than mapped, and the error has to name BOTH replacements or it just moves the guesswork.
+@test "normalizeBudget rejects 0 as ambiguous and says what to write instead" {
+  run bash -c "set -euo pipefail; source '${WARDEN_SH}'; normalizeBudget 0 CERT_MAX_RENEWALS_PER_RUN"
+  assert_failure
+  assert_output --partial "CERT_MAX_RENEWALS_PER_RUN='0' is ambiguous"
+  assert_output --partial "none"
+  assert_output --partial "unlimited"
+}
+
+# -1 conventionally means "no limit" elsewhere, which is the opposite of what it would do here.
+@test "normalizeBudget rejects negatives and nonsense" {
+  local bad
+  for bad in "-1" "five" "3.5" "1e3" "none-ish"; do
+    run bash -c "set -euo pipefail; source '${WARDEN_SH}'; normalizeBudget '${bad}' CERT_MAX_RENEWALS_PER_RUN"
+    assert_failure
+    assert_output --partial "must be 'none', 'unlimited' or a positive integer"
+  done
+}
+
+# The error must be VISIBLE. normalizeBudget is called through command substitution, so anything
+# it writes to stdout is captured into the caller's variable instead of shown (P-22).
+@test "normalizeBudget errors reach the operator, not the caller's variable" {
+  run bash -c "set -euo pipefail; source '${WARDEN_SH}'; captured=\$(normalizeBudget 0 X 2>/dev/null) || true; echo \"CAPTURED=[\${captured}]\""
+  refute_output --partial "ambiguous"
+  assert_output --partial "CAPTURED=[]"
+}
+
+@test "loadConfig: both budgets are unlimited by default" {
   source "${WARDEN_SH}"
   loadConfig
-  [ "${maxRenewalsPerRun}" -eq 0 ]
+  [ "${renewalBudgetMode}" = unlimited ]
+  [ "${newIssuanceBudgetMode}" = unlimited ]
   [ "${wardenRunsPerDay}" -eq 2 ]
   [ "${monitorWarnThreshold}" = "0.30" ]
 }
 
-# An explicit 0 is the shape EVERY real run sends: the composite action defaults
-# max-renewals-per-run to "0", so CERT_MAX_RENEWALS_PER_RUN is always set, never unset. The
-# unset default above is only reachable by running the script standalone.
-@test "loadConfig: the onboarding budget is separate and defaults to unlimited" {
+@test "loadConfig: the budgets are independent" {
   export CERT_MAX_RENEWALS_PER_RUN="3"
   source "${WARDEN_SH}"
   loadConfig
+  [ "${renewalBudgetMode}" = capped ]
   [ "${maxRenewalsPerRun}" -eq 3 ]
-  [ "${maxNewIssuancePerRun}" -eq 0 ] # capping renewals must NOT cap onboarding
+  [ "${newIssuanceBudgetMode}" = unlimited ] # capping renewals must NOT cap onboarding
 
+  # THE case this encoding exists for: renew nothing, onboard freely.
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="unlimited"
+  loadConfig
+  [ "${renewalBudgetMode}" = none ]
+  [ "${newIssuanceBudgetMode}" = unlimited ]
+
+  # ... and the mirror image, for pacing a bulk first issuance.
+  export CERT_MAX_RENEWALS_PER_RUN="unlimited"
   export CERT_MAX_NEW_ISSUANCE_PER_RUN="9"
   loadConfig
-  [ "${maxRenewalsPerRun}" -eq 3 ]
+  [ "${renewalBudgetMode}" = unlimited ]
+  [ "${newIssuanceBudgetMode}" = capped ]
   [ "${maxNewIssuancePerRun}" -eq 9 ]
 }
 
-@test "loadConfig: an unparsable onboarding budget fails the run loudly" {
-  run bash -c "set -euo pipefail; export CERT_MAX_NEW_ISSUANCE_PER_RUN='lots'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
-  assert_failure
-  assert_output --partial "CERT_MAX_NEW_ISSUANCE_PER_RUN must be a non-negative integer"
-  refute_output --partial "REACHED"
-}
-
-@test "loadConfig: an explicit cap of 0 means unlimited, exactly like unset" {
-  export CERT_MAX_RENEWALS_PER_RUN="0"
-  source "${WARDEN_SH}"
-  loadConfig
-  [ "${maxRenewalsPerRun}" -eq 0 ]
-
-  # ... and 0 must switch OFF every part of the feature, not just the budget check: no sizing
-  # guard, whatever the artifact holds.
-  metricsFile="${BATS_TEST_TMPDIR}/m.json"
-  write_metrics_fixture "${metricsFile}" \
-    '{"zone":"a.example.test","kv_cert_name":"x","action":"deferred","days_to_expiry":1,"lifetime_fraction_remaining":0.01,"error":""}'
-  run warnIfCapCannotDrain "${metricsFile}"
-  assert_success
-  refute_output --partial "::warning::"
-}
-
-# A caller wiring the input from a matrix var that the entry omits renders an EMPTY string, not
-# a missing variable. That must read as unlimited too, never as a parse failure.
-@test "loadConfig: an empty cap reads as unlimited" {
+@test "loadConfig: an empty budget reads as unlimited" {
+  # A caller wiring the input from a matrix var that the entry omits renders an EMPTY string,
+  # not a missing variable. That must read as unlimited, never as a parse failure.
   export CERT_MAX_RENEWALS_PER_RUN=""
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN=""
   export CERT_RUNS_PER_DAY=""
   export CERT_MONITOR_WARN_THRESHOLD=""
   source "${WARDEN_SH}"
   loadConfig
-  [ "${maxRenewalsPerRun}" -eq 0 ]
+  [ "${renewalBudgetMode}" = unlimited ]
+  [ "${newIssuanceBudgetMode}" = unlimited ]
   [ "${wardenRunsPerDay}" -eq 2 ]
   [ "${monitorWarnThreshold}" = "0.30" ]
 }
 
-@test "loadConfig: the renewal cap and its sizing-guard inputs are configurable" {
-  export CERT_MAX_RENEWALS_PER_RUN="5"
+@test "loadConfig: a rejected budget stops the run before any certificate work" {
+  run bash -c "set -euo pipefail; export CERT_MAX_RENEWALS_PER_RUN=0; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  refute_output --partial "REACHED"
+  run bash -c "set -euo pipefail; export CERT_MAX_NEW_ISSUANCE_PER_RUN=lots; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  assert_output --partial "CERT_MAX_NEW_ISSUANCE_PER_RUN must be"
+  refute_output --partial "REACHED"
+}
+
+@test "loadConfig: the sizing-guard inputs are configurable" {
   export CERT_RUNS_PER_DAY="4"
   export CERT_MONITOR_WARN_THRESHOLD="0.25"
   source "${WARDEN_SH}"
   loadConfig
-  [ "${maxRenewalsPerRun}" -eq 5 ]
   [ "${wardenRunsPerDay}" -eq 4 ]
   [ "${monitorWarnThreshold}" = "0.25" ]
 }
 
-# A typo'd cap must NOT read as "unlimited": that is exactly the multi-hour, runner-blocking run
-# the cap exists to prevent, and it would fail silently at the worst possible moment.
-@test "loadConfig: an unparsable renewal cap fails the run loudly" {
-  run bash -c "set -euo pipefail; export CERT_MAX_RENEWALS_PER_RUN='five'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
-  assert_failure
-  assert_output --partial "CERT_MAX_RENEWALS_PER_RUN must be a non-negative integer"
-  refute_output --partial "REACHED"
-
-  run bash -c "set -euo pipefail; export CERT_MAX_RENEWALS_PER_RUN='-3'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
-  assert_failure
-  refute_output --partial "REACHED"
+@test "describeBudget renders each mode as the word an operator would have written" {
+  source "${WARDEN_SH}"
+  run describeBudget none 0
+  assert_output "none"
+  run describeBudget unlimited 0
+  assert_output "unlimited"
+  run describeBudget capped 7
+  assert_output "7"
 }
 
 @test "loadConfig: the sizing-guard inputs are validated too" {
@@ -721,13 +760,13 @@ deferred_record() {
   certificateIssuanceCount=4
 
   run zoneBudgetFor "has-cert.example.test"
-  assert_output "renewal 1 3"
+  assert_output "renewal capped 1 3"
   run zoneBudgetFor "brand-new.example.test"
-  assert_output "onboarding 4 9"
+  assert_output "onboarding capped 4 9"
 }
 
-# THE property this whole change exists for: an exhausted renewal budget must leave onboarding
-# untouched, so a developer waiting on a first certificate is never queued behind a wave.
+# THE property the split exists for: an exhausted renewal budget must leave onboarding untouched,
+# so a developer waiting on a first certificate is never queued behind a wave.
 @test "zoneBudgetFor: an exhausted renewal budget does not block onboarding" {
   export CERT_MAX_RENEWALS_PER_RUN="3"
   source "${WARDEN_SH}"
@@ -738,15 +777,29 @@ deferred_record() {
   certificateIssuanceCount=0
 
   run zoneBudgetFor "old.example.test"
-  assert_output "renewal 3 3" # spent >= limit -> the caller defers this one
+  assert_output "renewal capped 3 3" # spent >= limit -> the caller defers this one
   run zoneBudgetFor "new.example.test"
-  assert_output "onboarding 0 0" # limit 0 = unlimited -> issued regardless of the wave
+  assert_output "onboarding unlimited 0 0" # issued regardless of the wave
 }
 
-@test "zoneBudgetFor collapses to the smallest cap when classification is unavailable" {
-  # A failed pre-pass leaves nothing to classify on. Collapsing onto the SMALLEST cap that is set
-  # can defer more than strictly necessary, but it can never turn the failure into the unbounded
-  # multi-hour run the caps exist to prevent.
+# The whole point of `none`: a deploy-triggered run onboards but renews nothing.
+@test "zoneBudgetFor: 'none' suppresses one class and leaves the other alone" {
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  source "${WARDEN_SH}"
+  loadConfig
+  zoneClassificationAvailable=true
+  zoneCertNotAfter=(["old.example.test"]="2026-10-01T00:00:00+00:00")
+
+  run zoneBudgetFor "old.example.test"
+  assert_output "renewal none 0 0" # nothing spent, nothing permitted
+  run zoneBudgetFor "new.example.test"
+  assert_output "onboarding unlimited 0 0"
+}
+
+@test "zoneBudgetFor collapses to the most restrictive budget when classification is unavailable" {
+  # A failed pre-pass leaves nothing to classify on. Collapsing onto the MOST RESTRICTIVE of the
+  # two can act on less than strictly necessary, but it can never turn the failure into the
+  # unbounded multi-hour run the budgets exist to prevent.
   export CERT_MAX_RENEWALS_PER_RUN="7"
   export CERT_MAX_NEW_ISSUANCE_PER_RUN="2"
   source "${WARDEN_SH}"
@@ -754,25 +807,33 @@ deferred_record() {
   zoneClassificationAvailable=false
   certificateRenewalCount=1
   certificateIssuanceCount=1
-
   run zoneBudgetFor "anything.example.test"
-  assert_output "combined 2 2" # spend is pooled, limit is min(7, 2)
+  assert_output "combined capped 2 2" # spend is pooled, limit is min(7, 2)
 
-  # Only one cap set -> that one governs everything.
-  export CERT_MAX_NEW_ISSUANCE_PER_RUN="0"
+  # One capped, one unlimited -> the cap governs everything.
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="unlimited"
   loadConfig
   zoneClassificationAvailable=false
   certificateRenewalCount=0
   certificateIssuanceCount=0
   run zoneBudgetFor "anything.example.test"
-  assert_output "combined 0 7"
+  assert_output "combined capped 0 7"
 
-  # Neither cap set -> unlimited, exactly as before the feature existed.
-  export CERT_MAX_RENEWALS_PER_RUN="0"
+  # `none` on EITHER class wins: unable to tell them apart, the run must not act on the class it
+  # was told to suppress, so it acts on nothing.
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="unlimited"
   loadConfig
   zoneClassificationAvailable=false
   run zoneBudgetFor "anything.example.test"
-  assert_output "combined 0 0"
+  assert_output "combined none 0 0"
+
+  # Neither constrained -> unlimited, exactly as before the feature existed.
+  export CERT_MAX_RENEWALS_PER_RUN="unlimited"
+  loadConfig
+  zoneClassificationAvailable=false
+  run zoneBudgetFor "anything.example.test"
+  assert_output "combined unlimited 0 0"
 }
 
 # The guard polices the RENEWAL budget. Onboarding zones carry no validity window, cannot sink the
@@ -798,4 +859,36 @@ deferred_record() {
   run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
   assert_success
   refute_output --partial "::warning::"
+}
+
+# With renewals suppressed the backlog never drains, so the drain estimate is infinite and the
+# advisory would fire on EVERY such run — precisely the alert churn it was written to prevent. A
+# caller deliberately keeping renewals off one trigger is not a misconfiguration.
+@test "warnIfCapCannotDrain stays silent when renewals are suppressed" {
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=() i
+  # A backlog that would scream under any cap: 51 certificates already past due.
+  for i in $(seq 1 51); do recs+=("$(deferred_record "z${i}.example.test" 90 70)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "warnIfCapCannotDrain still warns when the budget is a real cap" {
+  # The same backlog under a cap must still be reported — suppression is the exemption, not
+  # "deferred renewals are never worth mentioning".
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=() i
+  for i in $(seq 1 51); do recs+=("$(deferred_record "z${i}.example.test" 90 70)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_output --partial "::warning::"
+  assert_output --partial "CERT_MAX_RENEWALS_PER_RUN=3 is too small"
 }

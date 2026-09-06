@@ -302,7 +302,7 @@ JSON
   CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
   assert_success
   assert_output --partial "renewals=1"
-  assert_output --partial "Renewal budget spent (1/1)"
+  assert_output --partial "renewal budget spent (1/1)"
   # A correctly sized cap says nothing; these certificates are minutes old.
   refute_output --partial "::warning::"
 
@@ -351,14 +351,14 @@ JSON
   assert_output "0"
 }
 
-@test "e2e-10 cap of 0: enumeration order and the artifact are untouched" {
-  # The compatibility guarantee, in the shape a real consumer sends it. An uncapped run must make
-  # no Key Vault certificate listing at all and must keep Azure's enumeration order, so an
+@test "e2e-10 unlimited: enumeration order and the artifact are untouched" {
+  # The compatibility guarantee, in the shape a real consumer sends it. An unconstrained run must
+  # make no Key Vault certificate listing at all and must keep Azure's enumeration order, so an
   # existing consumer sees byte-identical behaviour down to the artifact's record order.
   #
-  # Deliberately an EXPLICIT 0 rather than an unset variable: the composite action defaults
-  # max-renewals-per-run to "0", so every run through the action sends the literal string, and
-  # that is the path a consumer opting out of the cap actually takes. Unset is covered too —
+  # Deliberately an EXPLICIT `unlimited` rather than an unset variable: the composite action
+  # defaults both budgets to "unlimited", so every run through the action sends the literal word,
+  # and that is the path a consumer who wants no pacing actually takes. Unset is covered too —
   # e2e-1 through e2e-8 all run without the variable at all.
   cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
 [
@@ -367,9 +367,9 @@ JSON
 ]
 JSON
   : >"${CW_STATE}/calls.log"
-  CERT_MAX_RENEWALS_PER_RUN=0 run_warden
+  CERT_MAX_RENEWALS_PER_RUN=unlimited CERT_MAX_NEW_ISSUANCE_PER_RUN=unlimited run_warden
   assert_success
-  refute_output --partial "Renewal budget for this run"
+  assert_output --partial "renewals=unlimited, new issuance=unlimited"
 
   # Record order follows the zone listing, NOT urgency.
   run jq -r '[.[].zone] | join(",")' "${METRICS_OUT}"
@@ -398,7 +398,7 @@ JSON
   CERT_MAX_NEW_ISSUANCE_PER_RUN=1 run_warden
   assert_success
   assert_output --partial "new issuance=1"
-  assert_output --partial "Onboarding budget spent (1/1)"
+  assert_output --partial "onboarding budget spent (1/1)"
 
   # One issued, one deferred — the issuance consumed the whole budget. Order-agnostic: with no
   # certificates anywhere there is no urgency to order by (see e2e-9's note).
@@ -472,4 +472,57 @@ issued"
   # An onboarding backlog is never an alerting matter, so the sizing guard stays silent even
   # though the onboarding budget was fully spent.
   refute_output --partial "::warning::"
+}
+
+@test "e2e-13 renewals: none — a deploy-triggered run onboards but renews nothing" {
+  # The shape a caller needs when the warden runs on two triggers: a cron that may renew, and a
+  # post-deploy run that must not. Renewals suppressed, onboarding untouched.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # cw-test keeps its certificate (so it is renewal work); zone2 loses its (onboarding work).
+  rm -f "${CW_STATE}/certs/le-cert-staging-zone2-cw-test-internal-pfx.json" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx-meta"
+
+  # force-renewal is ON: even an explicit force must not override a suppressed budget, or the
+  # suppression would be advisory rather than a guarantee.
+  CERT_MAX_RENEWALS_PER_RUN=none CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  assert_output --partial "renewals=none"
+  assert_output --partial "Renewals were suppressed for this run by design"
+  # The advisory must NOT fire: a suppressed budget is a deliberate choice, not a bad size, and
+  # firing here would mean a warning on every deploy-triggered run.
+  refute_output --partial "::warning::"
+
+  run jq -r 'map({(.zone): .action}) | add
+    | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "deferred
+issued"
+
+  # THE safety property: the suppressed zone still reports its real validity window, so the
+  # monitor keeps watching it age. Renewals switched off everywhere would sink
+  # min_lifetime_fraction and alert — suppression is visible, not invisible.
+  run jq -e '[.[] | select(.action == "deferred")] | length == 1 and (.[0]
+      | .days_to_expiry != null and .lifetime_fraction_remaining != null)' "${METRICS_OUT}"
+  assert_success
+
+  # A run that permits renewals picks it straight back up.
+  CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
+  assert_output "forced"
+}
+
+@test "e2e-14 an ambiguous budget stops the run before any certificate work" {
+  CERT_MAX_RENEWALS_PER_RUN=0 run_warden
+  assert_failure
+  assert_output --partial "is ambiguous"
+  assert_output --partial "none"
+  assert_output --partial "unlimited"
+  # Nothing was attempted: the run never reached zone enumeration.
+  refute_output --partial "Reading public DNS zones"
 }

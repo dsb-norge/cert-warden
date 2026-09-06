@@ -34,16 +34,26 @@ inputs:
     default: "false"
   max-renewals-per-run:
     description: >-
-      Maximum number of certificates this run may issue, renew or force. Further due
-      certificates are recorded `deferred` and left for the next run; the run then walks the
-      zones most-urgent-first. The force inputs are subject to it too. 0 (default) is unlimited.
-      Size it so a whole renewal wave drains within a few days — see docs/reference-usage.md.
+      Maximum number of certificates this run may RENEW or force — zones the Key Vault already
+      holds a certificate for. Further due certificates are recorded `deferred` and left for the
+      next run, most-urgent-first. The force inputs are subject to it too. 0 (default) is
+      unlimited. Size it so a whole renewal wave drains within a few days — see
+      docs/reference-usage.md. Does not limit first issuance; that is max-new-issuance-per-run.
+    required: false
+    default: "0"
+  max-new-issuance-per-run:
+    description: >-
+      Maximum number of FIRST certificates this run may issue — zones with no certificate yet.
+      A separate budget from max-renewals-per-run, so a renewal wave never holds up onboarding
+      (a first issuance is also ~3-5x cheaper: lego's pre-renewal random sleep does not apply).
+      0 (default) is unlimited. Set it to pace a bulk first issuance.
     required: false
     default: "0"
   runs-per-day:
     description: >-
       How often your caller runs the warden. Only used to check that max-renewals-per-run can
-      drain a wave before the monitor alerts; set it if your schedule is not twice daily.
+      drain a wave before the monitor alerts; set it if your schedule is not twice daily. Has no
+      effect on max-new-issuance-per-run, which cannot breach the monitor's SLO.
     required: false
     default: "2"
   monitor-warn-threshold:
@@ -81,7 +91,7 @@ outputs:
     description: "Zones whose certificate action failed this run."
     value: ${{ steps.run.outputs.zones-failed }}
   zones-deferred:
-    description: "Zones left for the next run because the max-renewals-per-run budget was spent."
+    description: "Zones left for the next run because their budget was spent (renewals + first issuance)."
     value: ${{ steps.run.outputs.zones-deferred }}
   min-lifetime-fraction:
     description: "Lowest remaining-lifetime fraction across managed certs (the SLO number; may be null)."
@@ -104,6 +114,7 @@ runs:
         CERT_FORCE_ALL_NEW: ${{ inputs.force-all-new }}
         CERT_FORCE_RENEWAL: ${{ inputs.force-renewal }}
         CERT_MAX_RENEWALS_PER_RUN: ${{ inputs.max-renewals-per-run }}
+        CERT_MAX_NEW_ISSUANCE_PER_RUN: ${{ inputs.max-new-issuance-per-run }}
         CERT_RUNS_PER_DAY: ${{ inputs.runs-per-day }}
         CERT_MONITOR_WARN_THRESHOLD: ${{ inputs.monitor-warn-threshold }}
         CERT_AZ_RESOURCE_TAG_ApplicationName: ${{ inputs.tag-application-name }}

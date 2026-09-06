@@ -70,8 +70,16 @@ on:
         default: false
       max-renewals-per-run:
         description: >-
-          Cap on the certificates one run may issue, renew or force (0 = unlimited). The rest are
-          recorded `deferred` for the next run. See docs/reference-usage.md for sizing.
+          Cap on the certificates one run may RENEW or force, i.e. zones already holding one
+          (0 = unlimited). The rest are recorded `deferred` for the next run. Does not limit
+          first issuance. See docs/reference-usage.md for sizing.
+        type: number
+        required: false
+        default: 0
+      max-new-issuance-per-run:
+        description: >-
+          Cap on FIRST certificates one run may issue, i.e. zones with none yet (0 = unlimited).
+          A separate budget, so a renewal wave never holds up onboarding.
         type: number
         required: false
         default: 0
@@ -115,7 +123,7 @@ on:
         description: "Zones with a failed certificate action."
         value: ${{ jobs.warden.outputs.zones-failed }}
       zones-deferred:
-        description: "Zones left for the next run by the max-renewals-per-run cap."
+        description: "Zones left for the next run by either budget."
         value: ${{ jobs.warden.outputs.zones-deferred }}
       min-lifetime-fraction:
         description: "The SLO number (may be null)."
@@ -170,6 +178,7 @@ jobs:
           force-all-new: ${{ inputs.force-all-new }}
           force-renewal: ${{ inputs.force-renewal }}
           max-renewals-per-run: ${{ inputs.max-renewals-per-run }}
+          max-new-issuance-per-run: ${{ inputs.max-new-issuance-per-run }}
           runs-per-day: ${{ inputs.runs-per-day }}
           monitor-warn-threshold: ${{ inputs.monitor-warn-threshold }}
           tag-application-name: ${{ inputs.tag-application-name }}

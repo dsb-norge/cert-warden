@@ -34,21 +34,23 @@ inputs:
     default: "false"
   max-renewals-per-run:
     description: >-
-      Maximum number of certificates this run may RENEW or force — zones the Key Vault already
-      holds a certificate for. Further due certificates are recorded `deferred` and left for the
-      next run, most-urgent-first. The force inputs are subject to it too. 0 (default) is
-      unlimited. Size it so a whole renewal wave drains within a few days — see
+      How many certificates this run may RENEW or force — zones the Key Vault already holds a
+      certificate for. `none`, `unlimited` (default) or a positive integer. Anything beyond the
+      budget is recorded `deferred` and left for the next run, most-urgent-first; the force inputs
+      are subject to it too. `none` lets a caller keep renewals off an ad-hoc trigger and on its
+      own schedule. Size a cap so a whole renewal wave drains within a few days — see
       docs/reference-usage.md. Does not limit first issuance; that is max-new-issuance-per-run.
+      NOTE `0` is rejected as ambiguous — write `none` or `unlimited`.
     required: false
-    default: "0"
+    default: "unlimited"
   max-new-issuance-per-run:
     description: >-
-      Maximum number of FIRST certificates this run may issue — zones with no certificate yet.
-      A separate budget from max-renewals-per-run, so a renewal wave never holds up onboarding
-      (a first issuance is also ~3-5x cheaper: lego's pre-renewal random sleep does not apply).
-      0 (default) is unlimited. Set it to pace a bulk first issuance.
+      The same, for FIRST certificates — zones with no certificate yet. A separate budget from
+      max-renewals-per-run, so a renewal wave never holds up onboarding (a first issuance is also
+      ~3-5x cheaper: lego's pre-renewal random sleep does not apply). `none`, `unlimited`
+      (default) or a positive integer. Set a number to pace a bulk first issuance.
     required: false
-    default: "0"
+    default: "unlimited"
   runs-per-day:
     description: >-
       How often your caller runs the warden. Only used to check that max-renewals-per-run can

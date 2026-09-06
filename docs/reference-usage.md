@@ -254,9 +254,14 @@ environment is one of the ways a fleet ends up in a single wave to begin with.
 
 ```yaml
 with:
-  max-renewals-per-run: 9      # zones that already hold a certificate
-  max-new-issuance-per-run: 0  # zones that do not — 0 = unlimited
+  max-renewals-per-run: 9              # zones that already hold a certificate
+  max-new-issuance-per-run: unlimited  # zones that do not (the default)
 ```
+
+Each budget takes **`none`**, **`unlimited`** (the default, also when unset) or a **positive
+integer**. `0` is rejected: "max 0" reads as *zero* to most people and as *no cap* to others, and
+the two readings fail in opposite directions — guessing "none" would silently stop renewal across
+an environment. The error names both replacements.
 
 They are deliberately **separate allowances**, not one pool:
 
@@ -284,12 +289,12 @@ amounts of time, *and* let a renewal wave hold up onboarding for days.
   `skipped`, `not_delegated` and `failed` cost nothing.
 - Renewals are walked **most-urgent-first** (ascending remaining validity), so the cap can only
   ever defer a certificate with more time left than the ones it renewed.
-- **The force flags respect both budgets.** If you really do want everything at once, leave them
-  unset — that is what expresses it.
+- **The force flags respect both budgets**, `none` included — suppression is a guarantee, not
+  advice. If you really do want everything at once, leave the budgets unset.
 - Nothing is carried between runs. Dueness is already the selector, the deferred certificates are
   still due, and the set shrinks as they renew.
 
-Two shapes worth naming:
+Three shapes worth naming:
 
 ```yaml
 # Pace a renewal wave; never make anyone wait to onboard.
@@ -297,7 +302,41 @@ max-renewals-per-run: 9
 
 # Pace a bulk first issuance (a not-yet-issued environment); leave maintenance alone.
 max-new-issuance-per-run: 9
+
+# Onboard now, renew nothing — see "Keeping renewals on your own schedule" below.
+max-renewals-per-run: none
 ```
+
+### Keeping renewals on your own schedule
+
+If your warden runs on more than one trigger — a cron *and*, say, `workflow_run` after an IaC
+deploy so a newly created zone gets its certificate in minutes rather than hours — then your real
+cadence is set by merge activity, not by you. That has three consequences worth heading off:
+
+- `runs-per-day` becomes a number you know to be wrong, so the undersized-cap advisory computes
+  against a fiction.
+- Drain time stops being predictable, so you cannot tell an operator when a backlog clears.
+- Renewals performed on deploy runs are timestamped in working hours, so ~60 days later they come
+  due in working hours — the wave re-forms around when people merge.
+
+And, most concretely: an ad-hoc run lands immediately after a deploy, which is exactly when the
+next deploy is most likely queued behind it on a shared runner.
+
+`none` resolves all four. Keep renewals on the schedule you control, and let the ad-hoc trigger do
+only the thing it exists for:
+
+```yaml
+with:
+  # Renew only on the cron; onboard on every trigger.
+  max-renewals-per-run: ${{ github.event_name == 'schedule' && 9 || 'none' }}
+  max-new-issuance-per-run: unlimited
+  runs-per-day: 2   # now literally true, so the advisory is computing against reality
+```
+
+A suppressed run is cheap — onboarding skips lego's pre-renewal sleep — and it is not silent: the
+step summary says renewals were suppressed by design, and the zones it held back are still
+recorded with their real validity window, so the monitor keeps watching them age. If you ever
+suppressed renewals on *every* trigger by mistake, `min_lifetime_fraction` would sink and alert.
 
 ### Sizing the renewal cap
 
@@ -365,6 +404,9 @@ If your callers differ from the assumed shape, tell the warden so the guard stay
 `runs-per-day` (default 2) and `monitor-warn-threshold` (default 0.30 — set it if you tuned the
 monitor's).
 
+The sizing rule below applies only to a **cap**. A `none` budget has no size to get wrong, so the
+advisory never fires on a suppressed run — otherwise every ad-hoc run would carry a warning.
+
 ### Watching a wave drain
 
 `zones-deferred` is a job output, and the step summary carries a `deferred` count split by class
@@ -380,8 +422,9 @@ artifact.
   certificate's remaining validity is untouched, so it sorts late in the renewal queue and can
   wait out a wave. It is picked up as soon as the wave drains.
 - **A Key Vault listing failure.** The pre-pass is what tells renewals from onboarding, so if it
-  fails both budgets collapse onto the smaller of the two. Conservative on purpose: the
-  alternative is letting a failed listing produce the unbounded run the caps exist to prevent.
+  fails both budgets collapse onto the most restrictive of the two — `none` on either class means
+  the run acts on nothing, and says so. Conservative on purpose: the alternative is letting a
+  failed listing produce the unbounded run the budgets exist to prevent.
 
 ## 2. Warden only (minimum viable consumer)
 

@@ -25,8 +25,8 @@ them as-is.
 | `LE_ENVIRONMENT_NAME` | no (`staging`) | `staging` or `production` |
 | `CERT_FORCE_ALL_NEW` | no (`false`) | Force new certs for all zones |
 | `CERT_FORCE_RENEWAL` | no (`false`) | Force renewal of existing certs |
-| `CERT_MAX_RENEWALS_PER_RUN` | no (`0`) | Cap on renewals/forces per run — zones the vault already holds a certificate for; `0` = unlimited. See [pacing](reference-usage.md#pacing-a-large-fleet) |
-| `CERT_MAX_NEW_ISSUANCE_PER_RUN` | no (`0`) | Cap on first issuances per run — zones with no certificate yet; `0` = unlimited. A **separate** budget |
+| `CERT_MAX_RENEWALS_PER_RUN` | no (`unlimited`) | Renewals/forces per run — zones the vault already holds a certificate for. `none`, `unlimited` or a positive integer; **`0` is rejected**. See [pacing](reference-usage.md#pacing-a-large-fleet) |
+| `CERT_MAX_NEW_ISSUANCE_PER_RUN` | no (`unlimited`) | The same for first issuances — zones with no certificate yet. A **separate** budget |
 | `CERT_RUNS_PER_DAY` | no (`2`) | The caller's warden cadence; only feeds the renewal cap's sizing guard |
 | `CERT_MONITOR_WARN_THRESHOLD` | no (`0.30`) | Mirror of the monitor's `WARN_THRESHOLD`; only feeds the same guard |
 | `CERT_METRICS_OUTPUT_FILE` | no | Where the metrics artifact is written |
@@ -34,6 +34,13 @@ them as-is.
 An unparsable value for any of the pacing variables **fails the run**. That is deliberate: a
 typo'd cap silently reading as "unlimited" reinstates exactly the multi-hour, runner-blocking run
 the cap exists to prevent, and it would do so at the worst possible moment.
+
+**`0` is rejected rather than mapped to a meaning.** It is the one value with a genuinely split
+reading — "max zero" says *none* to most people, *no cap* to others — and the two readings fail in
+opposite directions. Guessing "none" stops certificate renewal across an environment with no
+error, no failed zone and a green run. The error names both replacements. Negative values are
+rejected for the same reason: `-1` conventionally means "no limit" elsewhere, the opposite of what
+anyone would intend here.
 
 **The two budgets are independent, and a zone's class follows the vault, not the recorded
 action.** A zone the vault holds a certificate for draws on `CERT_MAX_RENEWALS_PER_RUN`; a zone it

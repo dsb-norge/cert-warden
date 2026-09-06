@@ -82,6 +82,12 @@ setup() {
   export EXEC_PATH="${HARNESS}/challtestsrv-hook.sh"
   export EXEC_POLLING_INTERVAL="2"
   export EXEC_PROPAGATION_TIMEOUT="30"
+  # lego's exec provider declares itself SEQUENTIAL: with more than one DNS-01 challenge on a
+  # certificate it solves them one at a time, sleeping EXEC_SEQUENCE_INTERVAL between. That
+  # defaults to 60s (dns01.DefaultPropagationTimeout), and every certificate here carries two
+  # names (apex + wildcard, or apex + www) -- so unset it costs a flat minute per issuance or
+  # renewal, which was ~95% of this suite's wall clock. challtestsrv is in-memory and instant.
+  export EXEC_SEQUENCE_INTERVAL="1"
   export CW_LEGO_DNS_RESOLVERS="127.0.0.1:8053"
   export CW_LEGO_EXTRA_ARGS="--dns.propagation.disable-ans"
   export CW_DIG_ARGS="@127.0.0.1 -p 5354"
@@ -320,10 +326,13 @@ JSON
         and .not_after != "")' "${METRICS_OUT}"
   assert_success
 
-  # The deferred zone was not evaluated at all — that is where the hours are saved. Its Key Vault
-  # object is named in the metrics, but no `az` call this run went near it.
-  deferredZone="$(jq -r '.[] | select(.action == "deferred") | .zone' "${METRICS_OUT}")"
-  run grep -c "${deferredZone}" "${CW_STATE}/calls.log"
+  # The deferred zone was not evaluated at all — that is where the hours are saved: no `az` call
+  # this run went near it. Matched on the Key Vault object name, NOT the zone name: zone names
+  # nest here ("cw-test.internal" is a substring of "zone2.cw-test.internal"), so a bare grep
+  # passes or fails purely on which zone got deferred (pitfall P-24). The `le-cert-staging-`
+  # prefix anchors where the zone part starts, so the object names cannot collide.
+  deferredKv="$(jq -r '.[] | select(.action == "deferred") | .kv_cert_name' "${METRICS_OUT}")"
+  run grep -c -- "${deferredKv}" "${CW_STATE}/calls.log"
   assert_output "0"
 
   # The budget holds across runs: force again and exactly one still moves.

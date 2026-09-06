@@ -89,6 +89,11 @@ a full registration + issuance still succeeds through the retry path against the
 - Fault injection via challtestsrv's management API (`:8055`): `set-txt`, `clear-txt`,
   `set-servfail`, `clear-servfail`, plus `dns-request-history` to assert what was queried.
 - Every seam override is in one place (`setup()`); see [contracts.md](contracts.md) §CW_*.
+- **Two lego env vars keep the suite from idling** — neither is a warden seam, and production
+  sets neither. `EXEC_SEQUENCE_INTERVAL=1`: lego's exec provider is *sequential*, so a
+  multi-name certificate has its DNS-01 challenges solved one at a time with this interval
+  between them, defaulting to **60s**. Every certificate here has two names, so leaving it
+  unset costs a flat minute per issuance or renewal — once ~95% of the suite's wall clock. And:
 - `LEGO_NO_RANDOM_SLEEP=true` is set there too — **not** a warden seam but lego's own env var.
   lego sleeps a random interval before every renewal to smear fleet-wide load; in the harness
   that is minutes of idling that exercises no code path. Production never sets it, so real runs
@@ -126,6 +131,7 @@ row AND the test — that's the review bar.
 | P-19 | Pebble authz reuse (default 50%) lets repeat issuances skip challenges — fault injection silently misses | compose (`PEBBLE_AUTHZREUSE=0`) |
 | P-20 | kcov 38's PS4/xtrace engine leaks trace to stderr: pollutes bats `run` captures AND registers zero source lines (a plausible-looking 0.00%). **Bit this repo** — use bashcov (dedicated `BASH_XTRACEFD`) | coverage via bashcov; advisory threshold |
 | P-21 | hosted-image drift (az/jq/openssl versions); kcov not even packaged in Ubuntu 24.04 | pinned tool versions; bashcov needs only preinstalled Ruby; weekly scheduled CI run (drift canary) |
+| P-24 | test zone names NEST (`cw-test.internal` is a substring of `zone2.cw-test.internal`), so `grep "$zone"` over a call log passes or fails on which zone a run happened to pick. Match an anchored token — the Key Vault object name, whose `le-cert-staging-` prefix fixes where the zone part starts. **Bit e2e-9 in CI only**, because the order differed there | e2e-9's "not evaluated" assertion |
 | P-23 | jq precedence: `\|` binds LOOSER than `,`, so `A \| length, (B)` evaluates B against A's result, not the input — a two-count assertion silently measures the wrong thing and fails for the wrong reason. Bind with `as $x \|` instead. **Bit the e2e suite** | review bar; e2e-9's budget-split assertion |
 | P-22 | **stdout overload**: in bash, human logs, function return values and machine protocols (GITHUB_OUTPUT, summaries) all share stdout — a logging change can corrupt the other two. **Bit this repo twice in one refactor** (string-returning predicates; output emission) | predicates return EXIT CODES; machine emission only via `set-output`; unit tests assert outputs/summaries are prefix-free |
 

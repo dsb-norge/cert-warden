@@ -259,11 +259,19 @@ with:
   max-renewals-per-run: 9
 ```
 
-- The cap counts **mutating** actions only. `skipped`, `not_delegated` and `failed` cost nothing.
+- The cap counts **mutating** actions only — `issued`, `renewed` and `forced` alike. Issuing a
+  first certificate for a new zone costs exactly as much as renewing an existing one; `skipped`,
+  `not_delegated` and `failed` cost nothing. A cap of 3 means three *certificates* per run, in
+  any mix.
 - Past the budget, a zone reaches neither Key Vault nor lego — no ACME traffic, no random delay.
 - The run walks the zones **most-urgent-first** (ascending remaining validity), so the cap can
   only ever defer a certificate with more time left than the ones it renewed. Zones with no
   certificate yet sort last: nothing is in service for them that could expire.
+- **A newly added zone therefore waits behind the backlog.** That is the deliberate cost of the
+  line above, and it is the one behaviour change a cap makes that an operator can walk into
+  unawares: with 28 certificates outstanding and a cap of 3, a zone added mid-drain is ~10 runs
+  — about five days — from its first certificate. Nothing alerts, because a zone with no
+  certificate has no lifetime fraction to sink. If you need one now, clear the cap for a run.
 - **The force flags respect the cap.** If you really do want everything at once, leave the cap
   unset — that is what expresses it.
 - Nothing is carried between runs. Dueness is already the selector, the deferred certificates are

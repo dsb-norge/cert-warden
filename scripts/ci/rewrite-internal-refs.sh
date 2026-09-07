@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 #
 # Rewrite every internal `uses: dsb-norge/cert-warden/...@<ref>` reference in the reusable
-# workflows to a given ref. Used by the PR preview mechanism (pr-preview.yml), which passes the
-# PR's HEAD SHA — an IMMUTABLE ref — so the generated preview commit is hermetic: pin it and the
-# engine it resolves cannot change under you.
+# workflows to a given ref. Used by the PR preview mechanism (pr-preview.yml), which passes an
+# IMMUTABLE per-push tag (`preview/pr-<N>-<short-sha>`) that it then points at the very commit
+# containing these rewrites. The published tree is therefore self-referential, and a consumer who
+# pins that tag cannot have the engine change underneath them.
 #
-# It passed the preview TAG until 2026-09, which made the generated commit non-hermetic, because
-# the tag is force-moved on every push. A consumer pinning the commit still had its actions
-# resolve at job start time, and a rebuild landing mid-run served two engines to two jobs of one
-# run. Only `.github/workflows/*.yml` is rewritten, so the action directories are byte-identical
-# between the PR head and the generated commit — which is why the head SHA resolves exactly the
-# code being previewed, and why a commit that cannot embed its own SHA does not need a tag here.
+# The ref MUST be one that resolves to the generated commit. Two attempts that do not:
+#
+#   - the moving `preview/pr-<N>` tag (the original design): force-moved on every push, so a
+#     rebuild mid-run served two different engines to two jobs of one run;
+#   - the PR head SHA: immutable, and fine for `actions/*` refs since only workflow files are
+#     rewritten — but reusable workflows reference EACH OTHER, and a workflow-to-workflow `uses:`
+#     then fetches the UN-rewritten file, whose own refs are `@vX.Y.Z`. That silently resolves
+#     the released engine instead of the PR's, and fails outright on a release PR where the
+#     version being released does not exist yet.
+#
+# pr-preview.yml enforces the property: every internal ref in the published tree must name the
+# tag, and the tag must resolve to that commit.
 #
 # On main these refs are exact release versions maintained by release-please
 # (`# x-release-please-version` annotations) — this script never runs against main's history;

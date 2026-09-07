@@ -667,6 +667,10 @@ function zoneBudgetFor() {
 #   3: error message ("" if none)
 #   4: notBefore fallback (optional) — used only when there is no readable PEM
 #   5: notAfter fallback (optional)  — used only when there is no readable PEM
+#   6: deferred reason (optional) — `budget-spent` or `budget-none`, for `deferred` records only.
+#      The monitor cannot otherwise tell a run that renewed nothing ON PURPOSE (a caller keeping
+#      renewals off an ad-hoc trigger) from one that renewed nothing because a drain stalled, and
+#      it has no budget inputs of its own to consult.
 # Uses globals: zoneName, certKvPfxSecretName, letsencryptEnvironment, metricsFile
 #
 # The fallback pair exists because not every recorded zone has its certificate on disk: a zone
@@ -678,7 +682,7 @@ function zoneBudgetFor() {
 # The two sources format dates differently (OpenSSL's "Sep  4 12:00:00 2026 GMT" vs Key Vault's
 # ISO-8601); `date -d` reads both, and the derived numeric fields are what consumers use.
 function recordCertMetric() {
-  local _action="$1" _certFile="$2" _err="${3:-}" _nbFallback="${4:-}" _naFallback="${5:-}"
+  local _action="$1" _certFile="$2" _err="${3:-}" _nbFallback="${4:-}" _naFallback="${5:-}" _deferredReason="${6:-}"
   local _nb="" _na="" _serial="" _issuer="" _keytype="" _sans="[]" _dte="null" _frac="null"
   local _naEpoch="" _nbEpoch="" _now
   if [ "${_certFile}" != "-" ] && [ -f "${_certFile}" ] && openssl x509 -in "${_certFile}" -noout &>/dev/null; then
@@ -714,7 +718,8 @@ function recordCertMetric() {
     --arg action "${_action}" --arg nb "${_nb}" --arg na "${_na}" --arg serial "${_serial}" \
     --arg issuer "${_issuer}" --arg keytype "${_keytype}" --argjson san "${_sans}" \
     --argjson dte "${_dte}" --arg frac "${_frac}" --arg err "${_err}" \
-    '{zone:$zone, kv_cert_name:$kv, le_env:$leenv, action:$action, not_before:$nb, not_after:$na, days_to_expiry:$dte, lifetime_fraction_remaining:(if $frac=="null" then null else ($frac|tonumber) end), serial:$serial, issuer:$issuer, key_type:$keytype, san:$san, error:$err}' \
+    --arg dreason "${_deferredReason}" \
+    '{zone:$zone, kv_cert_name:$kv, le_env:$leenv, action:$action, not_before:$nb, not_after:$na, days_to_expiry:$dte, lifetime_fraction_remaining:(if $frac=="null" then null else ($frac|tonumber) end), serial:$serial, issuer:$issuer, key_type:$keytype, san:$san, error:$err, deferred_reason:$dreason}' \
     >>"${metricsFile}"
 }
 
@@ -755,22 +760,29 @@ function warnIfCapCannotDrain() {
   # zones this run suppressed are still recorded with their real validity window.
   [ "${renewalBudgetMode}" = capped ] || return 0
 
-  # Deferred RENEWALS only. An onboarding zone deferred by the other budget does not drain via
-  # this one and has no certificate in service to sink, so counting it here would inflate the
-  # drain and make the guard cry wolf. "Holds a certificate" is exactly "has a validity window".
+  # Deferred renewals that are actually DUE. Two exclusions, for different reasons:
+  #
+  #   - an onboarding zone deferred by the other budget does not drain via this one and has no
+  #     certificate in service to sink;
+  #   - a HEALTHY certificate that was merely never reached is not backlog. Because renewals are
+  #     walked most-urgent-first, the healthy ones sort last and are always deferred -- so
+  #     counting every deferred renewal treats the whole fleet as a wave. A real run reported 38
+  #     deferred renewals where 16 were waiting and 22 had been renewed days earlier, which
+  #     inflated the drain estimate and, worse, recommended a cap of 38 on a 16-cert backlog.
+  #
+  # cw_is_due (lib/helpers.bash) applies lego's own renewal rule to the record. Reporting only --
+  # the budget itself never predicts dueness.
   local _deferredCount
-  _deferredCount=$(jq '[.[]
-    | select(.action == "deferred")
-    | select((.lifetime_fraction_remaining // null) != null)] | length' "${_metricsPath}")
+  _deferredCount=$(jq "${CW_JQ_LIB} [.[] | select(cw_deferred and cw_holds_cert and cw_is_due)] | length" "${_metricsPath}")
   [ "${_deferredCount}" -gt 0 ] || return 0
 
   # The most urgent deferred certificate: the fewest days before it sinks below the warn
   # threshold. Records with no validity window (never issued, or a failed pre-pass) cannot be
   # judged and are left out rather than guessed at.
   local _worst
-  _worst=$(jq -r --argjson warn "${monitorWarnThreshold}" '
+  _worst=$(jq -r --argjson warn "${monitorWarnThreshold}" "${CW_JQ_LIB}"'
     [ .[]
-      | select(.action == "deferred")
+      | select(cw_deferred and cw_is_due)
       | select((.days_to_expiry // null) != null)
       | select((.lifetime_fraction_remaining // 0) > 0)
       | {zone: .zone, wait: (.days_to_expiry * (1 - ($warn / .lifetime_fraction_remaining)))}
@@ -1186,16 +1198,20 @@ function main() {
       # at once expresses it by leaving the cap unset.
       read -r zoneClass zoneBudgetMode zoneBudgetSpent zoneBudgetLimit < <(zoneBudgetFor "${zoneName}")
       zoneDeferReason=""
+      zoneDeferCode=""
       if [ "${zoneBudgetMode}" = none ]; then
         zoneDeferReason="${zoneClass} budget is 'none' this run"
+        zoneDeferCode="budget-none"
       elif [ "${zoneBudgetMode}" = capped ] && [ "${zoneBudgetSpent}" -ge "${zoneBudgetLimit}" ]; then
         zoneDeferReason="${zoneClass} budget spent (${zoneBudgetSpent}/${zoneBudgetLimit})"
+        zoneDeferCode="budget-spent"
       fi
       if [ -n "${zoneDeferReason}" ]; then
         certKvPfxSecretName="$(zoneCertKvSecretName "${zoneName}")"
         log-info "  ${zoneDeferReason}, deferring ${zoneName} to the next run"
         recordCertMetric "deferred" "-" "" \
-          "${zoneCertNotBefore[${zoneName}]:-}" "${zoneCertNotAfter[${zoneName}]:-}"
+          "${zoneCertNotBefore[${zoneName}]:-}" "${zoneCertNotAfter[${zoneName}]:-}" \
+          "${zoneDeferCode}"
         continue # to next zone
       fi
 
@@ -1455,12 +1471,15 @@ function main() {
   # two mean different things: a deferred renewal is a certificate ageing towards the monitor's
   # threshold, a deferred onboarding zone is a deploy waiting on its first certificate.
   metricsDeferred=$(jq '[.[] | select(.action == "deferred")] | length' "${certMetricsOutputFile}")
-  metricsDeferredRenewals=$(jq '[.[]
-    | select(.action == "deferred")
-    | select((.lifetime_fraction_remaining // null) != null)] | length' "${certMetricsOutputFile}")
+  metricsDeferredRenewals=$(jq "${CW_JQ_LIB} [.[] | select(cw_deferred and cw_holds_cert)] | length" "${certMetricsOutputFile}")
   metricsDeferredNew=$((metricsDeferred - metricsDeferredRenewals))
+  # Of the deferred renewals, how many are actually waiting? The rest are healthy certificates the
+  # urgency walk never reached -- see cw_is_due. This is the number that describes a wave, and the
+  # warden's own output has to agree with the monitor's card when someone reads both.
+  metricsStillDue=$(jq "${CW_JQ_LIB} [.[] | select(cw_deferred and cw_holds_cert and cw_is_due)] | length" "${certMetricsOutputFile}")
+  metricsRenewed=$(jq "${CW_JQ_LIB} [.[] | select(cw_renewed)] | length" "${certMetricsOutputFile}")
   metricsMinFraction=$(jq '[.[] | .lifetime_fraction_remaining // empty] | if length > 0 then min else null end' "${certMetricsOutputFile}")
-  log-info "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} deferred=${metricsDeferred} (renewals=${metricsDeferredRenewals} new=${metricsDeferredNew}) min_lifetime_fraction=${metricsMinFraction}"
+  log-info "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} renewed=${metricsRenewed} deferred=${metricsDeferred} (renewals=${metricsDeferredRenewals} of which ${metricsStillDue} still due, new=${metricsDeferredNew}) min_lifetime_fraction=${metricsMinFraction}"
   if [ "${renewalBudgetMode}" = none ]; then
     log-info "  Renewals were suppressed for this run by design (max-renewals-per-run: none); ${metricsDeferredRenewals} zone(s) left for a run that permits them."
   fi
@@ -1473,7 +1492,9 @@ function main() {
     {
       echo "## Cert Warden — \`${letsencryptEnvironment}\` run summary"
       echo ""
-      echo "zones: **${metricsTotal}** · managed: **${metricsManaged}** · failed: **${metricsFailed}** · deferred: **${metricsDeferred}** (${metricsDeferredRenewals} renewal / ${metricsDeferredNew} new) · min lifetime remaining: **${metricsMinFraction}**"
+      echo "zones: **${metricsTotal}** · managed: **${metricsManaged}** · failed: **${metricsFailed}** · renewed: **${metricsRenewed}** · min lifetime remaining: **${metricsMinFraction}**"
+      echo ""
+      echo "deferred: **${metricsDeferred}** — ${metricsStillDue} renewal(s) still due, $((metricsDeferredRenewals - metricsStillDue)) not yet due, ${metricsDeferredNew} awaiting first issuance"
       echo ""
       echo "budgets — renewals: \`$(describeBudget "${renewalBudgetMode}" "${maxRenewalsPerRun}")\` · new issuance: \`$(describeBudget "${newIssuanceBudgetMode}" "${maxNewIssuancePerRun}")\`"
       if [ "${renewalBudgetMode}" = none ]; then

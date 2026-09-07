@@ -29,10 +29,10 @@ Commit messages are load-bearing: release-please derives versions and the public
 
 On every same-repo PR, `pr-preview.yml`:
 
-1. rewrites all internal `uses: dsb-norge/cert-warden/...@vX.Y.Z` refs to `preview/pr-<N>`
+1. rewrites all internal `uses: dsb-norge/cert-warden/...@vX.Y.Z` refs to **the PR head SHA**
    (`scripts/ci/rewrite-internal-refs.sh`),
 2. creates a **detached generated commit** of that tree (parent = the PR head; the PR branch
-   is never touched),
+   is never touched), and refuses to publish if any mutable internal ref survived into it,
 3. force-pushes tag `preview/pr-<N>` and upserts a sticky comment with copy-paste `uses:`
    lines,
 4. **dispatches `preview-consume.yml` at that tag** and awaits it — the suite consumed through
@@ -42,6 +42,33 @@ On every same-repo PR, `pr-preview.yml`:
 
 Invariants: `main` never contains preview scaffolding; consumers can use the preview ref
 immediately; fork PRs get tests but no preview (the job needs `contents: write`).
+
+### Two refs, for two different jobs
+
+| Want | Use | Why |
+|---|---|---|
+| A quick try | the tag `preview/pr-<N>` | One copy-paste line, always the latest push |
+| To run it somewhere real | the **generated commit** | Immutable, and hermetic |
+
+The tag is **force-moved on every push**, so it is a "latest" pointer, not a version. That is
+fine for a quick try and was the mechanism's original intent — but it is not enough for the case
+we actually ask consumers to perform: validating a release candidate in a live environment for
+days.
+
+What makes the commit safe to pin is step 1 above. The internal refs inside it are pinned to the
+PR head SHA rather than to the tag, so the whole tree resolves to one immutable state. **Until
+2026-09 they pointed at the tag**, which meant pinning the commit still left
+`uses: .../actions/warden@preview/pr-<N>` to resolve at job start time — and a rebuild landing
+between two jobs of one run served them different engines. One job passed on the old engine and
+the next failed on the new one, which is a genuinely confusing way to lose an afternoon.
+
+Two things make the head SHA the right ref rather than a second published tag: only
+`.github/workflows/*.yml` is rewritten, so every action directory is byte-identical between the
+PR head and the generated commit; and a commit cannot embed its own SHA, which is why a tag was
+reached for in the first place. Step 2's guard enforces the property rather than trusting it.
+
+**The generated commit stops being reachable when the PR closes** (the tag is deleted and nothing
+else points at it). Pin it for validation, never for production — for that, wait for a release.
 
 ## Releases
 

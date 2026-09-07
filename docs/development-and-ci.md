@@ -29,16 +29,17 @@ Commit messages are load-bearing: release-please derives versions and the public
 
 On every same-repo PR, `pr-preview.yml`:
 
-1. rewrites all internal `uses: dsb-norge/cert-warden/...@vX.Y.Z` refs to **the PR head SHA**
-   (`scripts/ci/rewrite-internal-refs.sh`),
+1. rewrites all internal `uses: dsb-norge/cert-warden/...@vX.Y.Z` refs to an **immutable
+   per-push tag** `preview/pr-<N>-<short-sha>` (`scripts/ci/rewrite-internal-refs.sh`),
 2. creates a **detached generated commit** of that tree (parent = the PR head; the PR branch
-   is never touched), and refuses to publish if any mutable internal ref survived into it,
-3. force-pushes tag `preview/pr-<N>` and upserts a sticky comment with copy-paste `uses:`
-   lines,
+   is never touched), then verifies every internal ref in it names that tag and that the tag
+   resolves to that commit — refusing to publish otherwise,
+3. force-pushes both `preview/pr-<N>` (moving) and `preview/pr-<N>-<short-sha>` (immutable), and
+   upserts a sticky comment with copy-paste `uses:` lines for each,
 4. **dispatches `preview-consume.yml` at that tag** and awaits it — the suite consumed through
    GitHub's real remote-fetch path, as a calling repo would (this is also the continuous proof
    that the shared `lib/helpers.bash` resolves in remotely-fetched actions),
-5. deletes the tag when the PR closes.
+5. deletes every `preview/pr-<N>` ref, moving and per-push alike, when the PR closes.
 
 Invariants: `main` never contains preview scaffolding; consumers can use the preview ref
 immediately; fork PRs get tests but no preview (the job needs `contents: write`).
@@ -47,28 +48,37 @@ immediately; fork PRs get tests but no preview (the job needs `contents: write`)
 
 | Want | Use | Why |
 |---|---|---|
-| A quick try | the tag `preview/pr-<N>` | One copy-paste line, always the latest push |
-| To run it somewhere real | the **generated commit** | Immutable, and hermetic |
+| A quick try | `preview/pr-<N>` | One copy-paste line, always the latest push |
+| To run it somewhere real | `preview/pr-<N>-<short-sha>` | Immutable, and self-referential |
 
 The tag is **force-moved on every push**, so it is a "latest" pointer, not a version. That is
 fine for a quick try and was the mechanism's original intent — but it is not enough for the case
 we actually ask consumers to perform: validating a release candidate in a live environment for
 days.
 
-What makes the commit safe to pin is step 1 above. The internal refs inside it are pinned to the
-PR head SHA rather than to the tag, so the whole tree resolves to one immutable state. **Until
-2026-09 they pointed at the tag**, which meant pinning the commit still left
-`uses: .../actions/warden@preview/pr-<N>` to resolve at job start time — and a rebuild landing
-between two jobs of one run served them different engines. One job passed on the old engine and
-the next failed on the new one, which is a genuinely confusing way to lose an afternoon.
+What makes the per-push ref safe to pin is that the tree is **self-referential**: every internal
+`uses:` inside it names that same tag, and that tag points at that same commit. Pin it and the
+whole suite — reusable workflows and the actions they call — resolves to one frozen state.
 
-Two things make the head SHA the right ref rather than a second published tag: only
-`.github/workflows/*.yml` is rewritten, so every action directory is byte-identical between the
-PR head and the generated commit; and a commit cannot embed its own SHA, which is why a tag was
-reached for in the first place. Step 2's guard enforces the property rather than trusting it.
+That property is fussier than it looks, and two earlier designs failed it:
 
-**The generated commit stops being reachable when the PR closes** (the tag is deleted and nothing
-else points at it). Pin it for validation, never for production — for that, wait for a release.
+- **The moving `preview/pr-<N>` tag** (until 2026-09). Force-moved on every push, so pinning even
+  the generated commit still left `uses: .../actions/warden@preview/pr-<N>` to resolve at job
+  start time. A rebuild between two jobs of one run served them different engines: one passed on
+  the old, the next failed on the new.
+- **The PR head SHA** (briefly, and wrongly). Immutable, and correct for `actions/*` — only
+  workflow files are rewritten, so the action directories are byte-identical. But reusable
+  workflows reference *each other*, and a workflow-to-workflow `uses:` then fetched the
+  **un-rewritten** file, whose own refs are `@vX.Y.Z`. That silently resolved the *released*
+  engine rather than the PR's — `preview-consume-e2e` went green while testing the wrong code —
+  and failed outright on a release PR, where the version being released does not exist yet.
+
+A commit cannot embed its own SHA, which is why a tag is needed. Step 2's guard enforces both
+halves (refs name the tag; the tag is this commit) rather than trusting them, and is deliberately
+stricter than "contains no mutable ref" — the head-SHA attempt satisfied that weaker test.
+
+**Every preview ref is deleted when the PR closes.** Pin one for validation, never for
+production — for that, wait for a release.
 
 ## Releases
 

@@ -52,6 +52,11 @@ listing produce an unbounded run.
 
 ### monitor (`actions/monitor/monitor.sh`)
 
+Outputs include the drain pair — `renewed-count` and `still-due-count` — alongside
+`severity`, `min-lifetime-fraction`, `managed-count`, `failed-count`, `worst-zone`,
+`awaiting-issuance-count`, `renewals-suppressed`, `reasons-json`, `notified` and
+`notify-http-status`. All are emitted **empty** under `UNKNOWN`.
+
 `METRICS_FILE`, `ENV_NAME`, `WARN_THRESHOLD` (0.30), `PAGE_THRESHOLD` (0.15),
 `LIVENESS_WINDOW_HOURS` (36), `CERT_WARDEN_CONCLUSION`, `CERT_WARDEN_RUN_URL`,
 `METRICS_AGE_HOURS`, `RESOLVE_FAILED` (`false`), `BOT_API_BASE`, `BOT_API_AUDIENCE`,
@@ -96,8 +101,18 @@ produce a record; that guarantee is regression-tested at every layer.
 
 `issued | renewed | forced | skipped | failed | not_delegated | deferred`.
 
-`deferred` means the budget for that zone's class was spent before the zone was reached: it was
-**not evaluated**, it is still due, and the next run takes it. Which budget applies is derivable
+`deferred` means the budget for that zone's class was spent before the zone was reached, or was
+set to `none`: the zone was **not evaluated**, and the next run that permits its class takes it.
+`deferred_reason` says which (`budget-spent` / `budget-none`).
+
+**A deferred record is not automatically a backlog.** Renewals are walked most-urgent-first, so
+healthy certificates sort last and are always deferred — a run can report dozens of deferred
+renewals while only a handful are actually waiting. Anything sizing a wave has to filter, and
+`cw_is_due` in [`lib/helpers.bash`](../lib/helpers.bash) is the shared definition for it: lego's
+own renewal rule (a third of the lifetime remaining, or a half below a 10-day lifetime) applied to
+the record's own numbers. The warden's advisory and the monitor's card both use it, so they cannot
+disagree about the size of a wave. It is **reporting only** — dueness for the purpose of actually
+renewing is still ARI's decision, inside lego. Which budget applies is derivable
 from the record — a deferred renewal carries a validity window, a deferred first issuance has
 none. It is a healthy state, not
 a finding — but note what that does and does not mean for the monitor:

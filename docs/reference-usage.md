@@ -409,9 +409,31 @@ advisory never fires on a suppressed run — otherwise every ad-hoc run would ca
 
 ### Watching a wave drain
 
-`zones-deferred` is a job output, and the step summary carries a `deferred` count split by class
-("23 deferred (23 renewal / 0 new)"), so progress across runs is visible without downloading the
-artifact.
+**`min_lifetime_fraction` cannot tell you whether a drain is working.** It tracks the worst
+*un-renewed* certificate, so it decays with the calendar rather than with progress — roughly
+0.005/day on a 90-day certificate. A multi-day drain therefore holds the SLO almost still while the
+backlog actually shrinks, and every alert in that window looks the same.
+
+So the numbers that *move* are reported alongside it, in three places:
+
+| Where | What it says |
+|---|---|
+| Warden step summary | `renewed: 3` and `deferred: 38 — 16 renewal(s) still due, 22 not yet due, 0 awaiting first issuance` |
+| Monitor step summary + Teams card | `Renewed this run: 3`, `Still due: 16`, and `Awaiting first issuance` when there is any |
+| Monitor reason line | `… — 16 still due, 3 renewed this run; draining` |
+
+That last clause is the one an operator reads first. It says `draining` when the run renewed
+something, `not draining` when it renewed nothing while certificates were due, and `renewals
+suppressed on this run by design` when the budget was `none` — so a repeated warning during a
+planned drain is something to track rather than something to mute.
+
+**Note the difference between `deferred` and *still due*.** Renewals are walked most-urgent-first,
+so healthy certificates sort last and are always deferred; a run can report 38 deferred renewals
+where only 16 are waiting. *Still due* is the number that describes a wave, and it is what the
+undersized-cap advisory sizes its estimate from.
+
+The severity verdict is untouched by any of this. A breach is a breach whether or not it is being
+worked off; the extra numbers change what you can do about it, not whether you are told.
 
 ### What the cap does not cover
 

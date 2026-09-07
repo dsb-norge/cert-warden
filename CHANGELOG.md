@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.1.0](https://github.com/dsb-norge/cert-warden/compare/v1.0.4...v1.1.0) (2026-09-07)
+
+
+### Features
+
+* **actions:** budget inputs take none | unlimited | a number ([96a991d](https://github.com/dsb-norge/cert-warden/commit/96a991d96da48c9c6e614031dfbbffc111495fdf))
+* **actions:** expose max-new-issuance-per-run ([7860ec3](https://github.com/dsb-norge/cert-warden/commit/7860ec37fef9e8abbfbbde778b0e6b895f321ead))
+* **actions:** expose the renewal cap on the warden action and workflow ([a42be57](https://github.com/dsb-norge/cert-warden/commit/a42be5709b53fe2ba0aef685942d71ade00ff767))
+* **lib:** share one definition of "due" between the warden and the monitor ([ba2cdd6](https://github.com/dsb-norge/cert-warden/commit/ba2cdd6d70690fca13bbf667d00fb62a1f6475eb))
+* **monitor:** report the numbers that move during a drain ([2207448](https://github.com/dsb-norge/cert-warden/commit/220744807e30359236c044ea3a31ec7b98e1b979))
+* **warden:** budget renewals and first issuance separately ([97ab6ea](https://github.com/dsb-norge/cert-warden/commit/97ab6ea5b44684175cb557d3d815e4bb99909c88))
+* **warden:** budgets take none | unlimited | a number, and reject 0 ([463082d](https://github.com/dsb-norge/cert-warden/commit/463082dbf533f222f20c4b35d66628d7007c6fd6))
+* **warden:** cap the mutating certificate actions per run ([30fadd0](https://github.com/dsb-norge/cert-warden/commit/30fadd063cc15dd47dd5e06bc406c247ddce4eff))
+* **warden:** warn when a renewal cap cannot drain before the monitor alerts ([8c174c0](https://github.com/dsb-norge/cert-warden/commit/8c174c035639bd26b16ffd167365d3cf376d3b16))
+
+
+### Bug Fixes
+
+* **ci:** make a preview commit safe to pin ([43cb74d](https://github.com/dsb-norge/cert-warden/commit/43cb74d7a21111c8983b8e63e4adb9ac440cf5b3))
+* **ci:** pin preview refs to a self-referential per-push tag ([1183004](https://github.com/dsb-norge/cert-warden/commit/11830045c74ce77ac8c684d0dcc9490a0984f199))
+* **warden:** size the undersized-cap advisory from due renewals only ([c2ab97a](https://github.com/dsb-norge/cert-warden/commit/c2ab97a608e7f29d59f037ea4ef2158213739b21))
+
 ## [1.0.4](https://github.com/dsb-norge/cert-warden/compare/v1.0.3...v1.0.4) (2026-09-01)
 
 

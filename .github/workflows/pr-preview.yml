@@ -71,7 +71,22 @@ jobs:
         run: |
           previewRef="preview/pr-${PR_NUMBER}"
 
-          bash scripts/ci/rewrite-internal-refs.sh "${previewRef}"
+          # Rewrite internal refs to the PR HEAD SHA, not to the preview tag.
+          #
+          # The tag is force-moved on every push, so refs pointing AT it made the generated
+          # commit non-hermetic: a consumer could pin the reusable workflow to this immutable
+          # commit and still have its `uses: .../actions/warden@preview/pr-N` resolve at job
+          # start time. A rebuild landing mid-run then served two different engines to two jobs
+          # of the same run -- observed in a consumer's test/dev matrix, where one job passed on
+          # the old engine and the next failed on the new one.
+          #
+          # The head SHA is immutable and works because rewrite-internal-refs.sh only touches
+          # `.github/workflows/*.yml`: every action directory is byte-identical between the PR
+          # head and this generated commit, so `actions/warden@<head-sha>` resolves to exactly
+          # the code being previewed. A commit cannot embed its own SHA, which is why the tag was
+          # reached for originally; the head SHA sidesteps that without a second ref to publish,
+          # move and clean up.
+          bash scripts/ci/rewrite-internal-refs.sh "${HEAD_SHA}"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -82,6 +97,17 @@ jobs:
           tree="$(git write-tree)"
           commit="$(git commit-tree "${tree}" -p "${HEAD_SHA}" \
             -m "preview: ${previewRef} (generated from ${HEAD_SHA}, internal refs rewritten)")"
+
+          # Guard: no mutable internal ref may survive into the published tree, or the
+          # hermeticity above is a comment rather than a property. Checks the COMMIT, not the
+          # working tree, so it validates what consumers actually fetch.
+          if git grep -nE 'uses:[[:space:]]+dsb-norge/cert-warden[^@[:space:]]*@(preview/|v[0-9]|main)' \
+            "${commit}" -- '.github/workflows/*.yml'; then
+            echo "::error::preview commit ${commit} still contains a mutable internal ref (see above)."
+            exit 1
+          fi
+          echo "Guard: every internal ref in ${commit} is pinned to ${HEAD_SHA}."
+
           git tag -f "${previewRef}" "${commit}"
           git push --force "https://x-access-token:${APP_TOKEN}@github.com/${REPO}.git" \
             "refs/tags/${previewRef}"
@@ -113,8 +139,7 @@ jobs:
           cat >preview-comment.md <<EOF
           ### 🧪 Preview ref for this PR: \`${PREVIEW_REF}\`
 
-          Test this PR from a calling repo — internal refs are rewritten so everything resolves
-          at this one tag:
+          **A quick try** — moves with every push to this PR:
 
           ~~~yaml
           # reusable workflows
@@ -123,8 +148,18 @@ jobs:
           uses: dsb-norge/cert-warden/actions/warden@${PREVIEW_REF}
           ~~~
 
+          **Running it somewhere real, for longer than one job?** Pin the generated commit
+          instead. It is immutable, and every internal ref inside it is pinned to
+          \`${HEAD_SHA:0:7}\` — so a rebuild mid-run cannot swap the engine under you:
+
+          ~~~yaml
+          uses: dsb-norge/cert-warden/.github/workflows/reusable-warden.yml@${PREVIEW_COMMIT}
+          uses: dsb-norge/cert-warden/actions/warden@${HEAD_SHA}
+          ~~~
+
           - Refreshed on every push to this PR (currently \`${HEAD_SHA:0:7}\` → generated commit \`${PREVIEW_COMMIT:0:7}\`).
-          - Deleted automatically when the PR closes — never merged, never on \`main\`.
+          - The tag is deleted when the PR closes; the generated commit is not reachable
+            afterwards, so pin it for validation, never for production.
           EOF
 
       # In-repo upsert instead of marocchino/sticky-pull-request-comment. Beyond dropping a

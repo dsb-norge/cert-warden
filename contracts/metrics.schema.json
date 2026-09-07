@@ -39,6 +39,11 @@
       "error": {
         "type": "string",
         "description": "Error message for failed actions; empty otherwise."
+      },
+      "deferred_reason": {
+        "type": "string",
+        "enum": ["", "budget-spent", "budget-none"],
+        "description": "Why a deferred zone was not evaluated: budget-spent (the run reached its cap) or budget-none (the budget for this class was set to none, i.e. suppressed on purpose). Empty for every other action. The monitor uses it to tell a run that renewed nothing BY DESIGN from a drain that stalled; it has no budget inputs of its own."
       }
     }
   }

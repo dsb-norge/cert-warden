@@ -75,3 +75,48 @@ EOF
   assert_success
   assert_output "::add-mask::supersecret"
 }
+
+# --- the shared "due" vocabulary -------------------------------------------------------------
+# cw_is_due is the ONE definition the warden's advisory and the monitor's card both use, so a
+# wave can never be two different sizes depending on which one you read. It is lego's own rule
+# (cmd_run_renew.go getDueDate): renew at a third of the lifetime remaining, or a half when the
+# lifetime is 10 days or less.
+
+due_of() { # <fraction> <days_to_expiry> -> true|false
+  jq -r "${CW_JQ_LIB} .[0] | cw_is_due" <<<"[{\"lifetime_fraction_remaining\": ${1}, \"days_to_expiry\": ${2}}]"
+}
+
+@test "cw_is_due applies lego's one-third rule to a normal certificate" {
+  source "${HELPERS_BASH}"
+  # 90-day certificate: the renewal point is 30 days left, i.e. a fraction of 1/3.
+  [ "$(due_of 0.295 26)" = true ]  # past due — the wave in a real drain
+  [ "$(due_of 0.97 117)" = false ] # renewed days ago, four months of life left
+  [ "$(due_of 0.34 31)" = false ]  # just inside the window, not yet
+}
+
+@test "cw_is_due switches to one-half for short-lived certificates, as lego does" {
+  source "${HELPERS_BASH}"
+  # 5-day certificate: lego renews at half the lifetime, not a third.
+  [ "$(due_of 0.4 2)" = true ]  # 0.4 < 1/2 -> due, though it would NOT be under the 1/3 rule
+  [ "$(due_of 0.7 4)" = false ] # 0.7 > 1/2 -> not yet
+}
+
+@test "cw_is_due treats an expired certificate as due and an unissued zone as not" {
+  source "${HELPERS_BASH}"
+  [ "$(due_of -0.02 -2)" = true ] # already expired: unambiguously due
+  # A zone with no certificate has no fraction. It is NOT renewal backlog — it is onboarding,
+  # governed by the other budget — so it must never inflate a renewal drain estimate.
+  [ "$(due_of null null)" = false ]
+  [ "$(due_of null 30)" = false ]
+  [ "$(due_of 0.5 null)" = false ]
+}
+
+@test "cw_deferred, cw_renewed and cw_holds_cert classify the actions" {
+  source "${HELPERS_BASH}"
+  classify() { jq -r "${CW_JQ_LIB} .[0] | \"\(cw_deferred) \(cw_renewed) \(cw_holds_cert)\"" <<<"[${1}]"; }
+  [ "$(classify '{"action":"deferred","lifetime_fraction_remaining":0.3}')" = "true false true" ]
+  [ "$(classify '{"action":"deferred","lifetime_fraction_remaining":null}')" = "true false false" ]
+  [ "$(classify '{"action":"renewed","lifetime_fraction_remaining":0.9}')" = "false true true" ]
+  [ "$(classify '{"action":"forced","lifetime_fraction_remaining":0.9}')" = "false true true" ]
+  [ "$(classify '{"action":"issued","lifetime_fraction_remaining":0.9}')" = "false false true" ]
+}

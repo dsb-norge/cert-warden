@@ -892,3 +892,66 @@ deferred_record() {
   assert_output --partial "::warning::"
   assert_output --partial "CERT_MAX_RENEWALS_PER_RUN=3 is too small"
 }
+
+# THE finding this fixes: renewals are walked most-urgent-first, so healthy certificates sort last
+# and are always deferred. Counting them as backlog sizes the wave from the whole fleet — a real
+# run reported 38 deferred renewals where 16 were waiting and 22 had been renewed days earlier,
+# which recommended a cap of 38 for a 16-certificate backlog.
+@test "warnIfCapCannotDrain sizes the wave from DUE renewals, not every deferred one" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=() i
+  # 16 genuinely waiting (90-day certificates, 64 days old -> fraction ~0.29).
+  for i in $(seq 1 16); do recs+=("$(deferred_record "due${i}.example.test" 90 64)"); done
+  # 22 renewed three days ago and good for months. Deferred only because they sort last.
+  for i in $(seq 1 22); do recs+=("$(deferred_record "fresh${i}.example.test" 90 3)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_output --partial "::warning::"
+  # 16, not 38 — and the recommended cap follows the same number.
+  assert_output --partial "Draining 16 deferred renewal(s)"
+  refute_output --partial "Draining 38"
+  # The margin is genuinely gone (fraction 0.29 is already below warn 0.30), so "move the whole
+  # remaining backlog" is correct advice — but it must be the real backlog.
+  assert_output --partial "Raise the cap to 16"
+}
+
+@test "warnIfCapCannotDrain stays silent when every deferred renewal is healthy" {
+  # The fleet is fine; the run simply never reached the far end of the walk. Nothing to advise.
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=() i
+  for i in $(seq 1 38); do recs+=("$(deferred_record "fresh${i}.example.test" 90 3)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "recordCertMetric carries why a zone was deferred" {
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="z.example.test"
+  certKvPfxSecretName="le-cert-staging-z-pfx"
+  recordCertMetric "deferred" "-" "" "" "" "budget-none"
+  recordCertMetric "deferred" "-" "" "" "" "budget-spent"
+  recordCertMetric "skipped" "-" ""
+
+  run jq -s -e '.[0].deferred_reason == "budget-none"
+    and .[1].deferred_reason == "budget-spent"
+    and .[2].deferred_reason == ""' "${metricsFile}"
+  assert_success
+
+  # And it stays inside the shipped contract.
+  schema="${REPO_ROOT}/contracts/metrics.schema.json"
+  run jq -e --slurpfile schema "${schema}" -s '
+    ($schema[0].items.properties.deferred_reason.enum) as $allowed
+    | all(.[]; . as $rec | ($allowed | index($rec.deferred_reason)) != null)' "${metricsFile}"
+  assert_success
+}

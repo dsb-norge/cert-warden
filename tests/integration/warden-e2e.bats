@@ -526,3 +526,47 @@ issued"
   # Nothing was attempted: the run never reached zone enumeration.
   refute_output --partial "Reading public DNS zones"
 }
+
+@test "e2e-15 the whole drain-visibility chain: real warden output reaches the card" {
+  # Everything from the warden writing `deferred_reason` through the artifact to the Adaptive Card
+  # the bot receives. Unit tests cover each hop against fixtures; this one uses the real artifact
+  # a real capped run just produced, which is the only way to catch a field that gets written but
+  # never read (or read under the wrong name).
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # Both zones hold a certificate, so both are renewal work; force so both are candidates.
+  run_warden
+  assert_success
+
+  # Suppress renewals: every renewal-class zone is deferred with reason `budget-none`.
+  CERT_MAX_RENEWALS_PER_RUN=none CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  run jq -r '[.[] | select(.deferred_reason == "budget-none")] | length' "${METRICS_OUT}"
+  refute_output "0"
+
+  # Now the monitor over that very artifact. FORCE_NOTIFY so a healthy fleet still posts a card.
+  local sinklog="${BATS_TEST_TMPDIR}/sink.log"
+  python3 "${HARNESS}/bot-sink/sink.py" 8026 "${sinklog}" &
+  local sinkpid=$!
+  sleep 1
+  ENV_NAME="l2" METRICS_FILE="${METRICS_OUT}" DRY_RUN="false" FORCE_NOTIFY="true" \
+    BOT_API_BASE="http://127.0.0.1:8026/api" BOT_API_AUDIENCE="api://l2-test" \
+    BOT_ALIAS="from-l2" run bash "${MONITOR_SH}"
+  kill "${sinkpid}" 2>/dev/null || true
+  assert_success
+  assert_output --partial "renewals_suppressed=true"
+
+  # The card the bot actually received carries the drain facts...
+  run jq -r '[.body.message.body[] | select(.type == "FactSet") | .facts[] | .title] | join(",")' "${sinklog}"
+  assert_output --partial "Renewed this run"
+  assert_output --partial "Still due"
+
+  # ... and reports the suppression rather than calling a deliberate no-op a stalled drain.
+  run jq -r '.body.message.body[] | select(.type == "FactSet") | .facts[]
+    | select(.title == "Renewed this run") | .value' "${sinklog}"
+  assert_output --partial "renewals suppressed"
+}

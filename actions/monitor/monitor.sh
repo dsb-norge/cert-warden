@@ -52,6 +52,18 @@
 #    FORCE_NOTIFY             "true" to post even when status is OK (manual test)
 #    DRY_RUN                  "true" to evaluate + log but never POST
 #
+#  Drain reporting. Alongside the lifetime SLO the monitor reports the two numbers that MOVE
+#  during a paced renewal drain: how many certificates the run renewed, and how many are still
+#  due. min_lifetime_fraction cannot answer "is this draining or stuck?" -- it decays with the
+#  calendar (~0.005/day on a 90-day certificate), so a multi-day drain otherwise produces a run of
+#  identical cards, which is exactly the pattern that teaches an on-call to ignore the channel.
+#  "Still due" uses cw_is_due from lib/helpers.bash, the same definition the warden's undersized-
+#  cap advisory uses, so the card and the run annotation cannot disagree. A run that renewed
+#  nothing while certificates are due warns on its own account -- unless the warden recorded that
+#  renewals were suppressed on purpose (deferred_reason: budget-none), which is a caller keeping
+#  renewals off an ad-hoc trigger, not a stall. Severity is deliberately untouched by all of this:
+#  the breach is real whether or not it is being worked off.
+#
 #  Exit code is always 0 on a completed evaluation (monitoring must not fail the workflow);
 #  notification-delivery failures are logged and surfaced via the step summary.
 #
@@ -100,6 +112,14 @@ worstDays=""
 managedCount=0
 failedCount=0
 failedZones=""
+# Drain figures. min_lifetime_fraction answers "how healthy is the fleet"; these answer "is it
+# getting better", which is a different question and the only one an operator can act on during a
+# paced drain. The SLO decays with the calendar (~0.005/day on a 90-day certificate), so a
+# multi-day drain produces a run of near-identical cards unless the moving numbers are on them.
+renewedCount=0
+stillDueCount=0
+awaitingIssuanceCount=0
+renewalsSuppressed=false
 
 # jq empty: a truncated/corrupt artifact (e.g. the warden died mid-write) must degrade to the
 # absent-metrics path — the monitor NEVER fails the workflow (its core contract).
@@ -125,7 +145,19 @@ elif [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]] && jq empty "${METRICS
     worstDays=$(jq -r --argjson m "${minLifetimeFraction}" 'first(.[] | select((.kv_cert_name // "") != "" and .lifetime_fraction_remaining == $m)) | (.days_to_expiry // "?")' "${METRICS_FILE}")
   fi
 
-  echo "${_action_name}: managed=${managedCount} failed=${failedCount} min_lifetime_fraction=${minLifetimeFraction} worst_zone=${worstZone} worst_days=${worstDays}"
+  # `cw_is_due` (lib/helpers.bash) is the SHARED definition the warden's advisory uses, so the
+  # card and the run annotation can never disagree about the size of a wave.
+  renewedCount=$(jq "${CW_JQ_LIB} [.[] | select(cw_renewed)] | length" "${METRICS_FILE}")
+  stillDueCount=$(jq "${CW_JQ_LIB} [.[] | select(cw_deferred and cw_holds_cert and cw_is_due)] | length" "${METRICS_FILE}")
+  awaitingIssuanceCount=$(jq "${CW_JQ_LIB} [.[] | select(cw_deferred and (cw_holds_cert | not))] | length" "${METRICS_FILE}")
+  # A run told to renew nothing (max-renewals-per-run: none) renews nothing BY DESIGN. Without
+  # this the card would call every such run stalled -- and a caller keeping renewals off an ad-hoc
+  # trigger gets one of those on every deploy.
+  if jq -e '[.[] | select(.deferred_reason == "budget-none")] | length > 0' "${METRICS_FILE}" >/dev/null 2>&1; then
+    renewalsSuppressed=true
+  fi
+
+  echo "${_action_name}: managed=${managedCount} failed=${failedCount} renewed=${renewedCount} still_due=${stillDueCount} awaiting_issuance=${awaitingIssuanceCount} renewals_suppressed=${renewalsSuppressed} min_lifetime_fraction=${minLifetimeFraction} worst_zone=${worstZone} worst_days=${worstDays}"
   end-group
 else
   echo "${_action_name}: metrics file '${METRICS_FILE:-<unset>}' missing, empty or unparsable."
@@ -146,16 +178,40 @@ if [[ "${RESOLVE_FAILED}" == "true" ]]; then
   severity="UNKNOWN"
   reasons+=("could not resolve which Cert Warden run to evaluate (GitHub API unreachable after retries) — certificate health was NOT checked")
 else
+  # A breach that is draining and a breach that is stuck read identically from the SLO alone, and
+  # a paced drain legitimately holds certificates below the threshold for days. Say which it is,
+  # in the line a reader always sees, or four days of identical cards teaches them to mute the
+  # channel -- which then costs the alert that matters. The verdict is deliberately NOT softened:
+  # the breach is real either way.
+  drainNote=""
+  if [[ "${stillDueCount}" -gt 0 ]]; then
+    if [[ "${renewalsSuppressed}" == "true" ]]; then
+      drainNote=" — ${stillDueCount} still due; renewals suppressed on this run by design"
+    elif [[ "${renewedCount}" -gt 0 ]]; then
+      drainNote=" — ${stillDueCount} still due, ${renewedCount} renewed this run; draining"
+    else
+      drainNote=" — ${stillDueCount} still due and NOTHING renewed this run; not draining"
+    fi
+  fi
+
   # Layer A — managed-cert lifetime SLO (lifetime-relative, scales to any cert duration).
   if [[ "${minLifetimeFraction}" != "null" ]]; then
     if awk "BEGIN { exit !(${minLifetimeFraction} < ${PAGE_THRESHOLD}) }"; then
       severity="CRITICAL"
-      reasons+=("min_lifetime_fraction ${minLifetimeFraction} < page threshold ${PAGE_THRESHOLD} (worst: ${worstZone}, ~${worstDays}d left)")
+      reasons+=("min_lifetime_fraction ${minLifetimeFraction} < page threshold ${PAGE_THRESHOLD} (worst: ${worstZone}, ~${worstDays}d left)${drainNote}")
     elif awk "BEGIN { exit !(${minLifetimeFraction} < ${WARN_THRESHOLD}) }"; then
       severity="WARNING"
-      reasons+=("min_lifetime_fraction ${minLifetimeFraction} < warn threshold ${WARN_THRESHOLD} (worst: ${worstZone}, ~${worstDays}d left)")
+      reasons+=("min_lifetime_fraction ${minLifetimeFraction} < warn threshold ${WARN_THRESHOLD} (worst: ${worstZone}, ~${worstDays}d left)${drainNote}")
     fi
   fi
+
+  # NOTE: deliberately NO standalone "nothing renewed" alert here, tempting as it looks. `cw_is_due`
+  # is a proxy for lego's decision and disagrees with it by hours at the boundary — and a fleet
+  # issued together crosses that boundary all at once, which is precisely the wave a cap is used
+  # on. A run that legitimately renewed nothing because ARI had not quite released the window
+  # would then warn on its own account, every run, until the window opened. The drain note above
+  # rides on a breach that has already been judged real, so it can add information without adding
+  # alerts; the lifetime SLO remains the thing that decides whether anyone is woken.
 
   # Layer C — job health (informational; never escalates above WARNING on its own).
   if [[ "${managedCount}" -eq 0 && "${failedCount}" -eq 0 ]]; then
@@ -190,11 +246,16 @@ if [[ "${severity}" == "UNKNOWN" ]]; then
   dspFailed="not evaluated"
   dspMinLifetime="not evaluated"
   dspWorst="not evaluated"
+  dspRenewed="not evaluated"
+  dspStillDue="not evaluated"
 else
   dspManaged="${managedCount}"
   dspFailed="${failedCount}${failedZones:+ (${failedZones})}"
   dspMinLifetime="${minLifetimeFraction}"
   dspWorst="${worstZone:-n/a}${worstDays:+ (~${worstDays}d left)}"
+  dspRenewed="${renewedCount}"
+  dspStillDue="${stillDueCount}${renewalsSuppressed:+}"
+  [[ "${renewalsSuppressed}" == "true" ]] && dspStillDue="${stillDueCount} (renewals suppressed this run)"
 fi
 
 {
@@ -204,6 +265,8 @@ fi
   echo "| --- | --- |"
   echo "| Managed certs | ${dspManaged} |"
   echo "| Failed | ${dspFailed} |"
+  echo "| Renewed this run | ${dspRenewed} |"
+  echo "| Still due | ${dspStillDue} |"
   echo "| min_lifetime_fraction | ${dspMinLifetime} |"
   echo "| Worst zone | ${dspWorst} |"
   echo "| Cert Warden run | ${CERT_WARDEN_CONCLUSION:-n/a} |"
@@ -233,11 +296,19 @@ emitOutputs() {
     set-output "managed-count" ""
     set-output "failed-count" ""
     set-output "worst-zone" ""
+    set-output "renewed-count" ""
+    set-output "still-due-count" ""
+    set-output "awaiting-issuance-count" ""
+    set-output "renewals-suppressed" ""
   else
     set-output "min-lifetime-fraction" "${minLifetimeFraction}"
     set-output "managed-count" "${managedCount}"
     set-output "failed-count" "${failedCount}"
     set-output "worst-zone" "${worstZone}"
+    set-output "renewed-count" "${renewedCount}"
+    set-output "still-due-count" "${stillDueCount}"
+    set-output "awaiting-issuance-count" "${awaitingIssuanceCount}"
+    set-output "renewals-suppressed" "${renewalsSuppressed}"
   fi
   set-output "resolve-failed" "${RESOLVE_FAILED}"
   set-output "reasons-json" "$(printf '%s\n' "${reasons[@]:-}" | jq -R . | jq -sc 'map(select(. != ""))')"
@@ -279,21 +350,32 @@ case "${severity}" in
 esac
 
 reasonsText=$(printf '%s\n' "${reasons[@]:-no issues}" | sed 's/^/- /')
+# The FactSet carries the moving numbers as well as the SLO. `Renewed this run` and `Still due`
+# are the pair that answers "draining or stuck?" -- min_lifetime_fraction cannot, because it
+# decays with the calendar rather than with progress. The last two facts appear only when they
+# have something to say, so an ordinary card stays short.
 factsJson=$(jq -n \
   --arg env "${ENV_NAME}" \
   --arg managed "${managedCount}" \
   --arg failed "${failedCount}" \
+  --arg renewed "${renewedCount}" \
+  --arg stilldue "${stillDueCount}" \
+  --arg awaiting "${awaitingIssuanceCount}" \
   --arg minlf "${minLifetimeFraction}" \
   --arg worst "${worstZone:-n/a}${worstDays:+ (~${worstDays}d)}" \
   --arg run "${CERT_WARDEN_CONCLUSION:-n/a}" \
+  --argjson suppressed "${renewalsSuppressed}" \
   '[
      {title: "Environment", value: $env},
      {title: "Managed certs", value: $managed},
      {title: "Failed", value: $failed},
+     {title: "Renewed this run", value: (if $suppressed then ($renewed + " (renewals suppressed)") else $renewed end)},
+     {title: "Still due", value: $stilldue},
      {title: "min_lifetime_fraction", value: $minlf},
      {title: "Worst zone", value: $worst},
      {title: "Cert Warden run", value: $run}
-   ]')
+   ]
+   + (if ($awaiting | tonumber) > 0 then [{title: "Awaiting first issuance", value: $awaiting}] else [] end)')
 
 card=$(jq -n \
   --arg title "${title}" \

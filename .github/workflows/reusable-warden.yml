@@ -68,6 +68,36 @@ on:
         type: boolean
         required: false
         default: false
+      max-renewals-per-run:
+        # string, not number: the vocabulary is `none` | `unlimited` | <n>. `0` is rejected as
+        # ambiguous — the two readings ("zero" vs "no cap") fail in opposite directions, and the
+        # wrong one silently stops renewal. Same convention as reusable-monitor.yml's thresholds.
+        description: >-
+          How many certificates one run may RENEW or force, i.e. zones already holding one:
+          `none`, `unlimited` (default) or a positive integer. The rest are recorded `deferred`
+          for the next run. Does not limit first issuance. See docs/reference-usage.md.
+        type: string
+        required: false
+        default: "unlimited"
+      max-new-issuance-per-run:
+        description: >-
+          The same for FIRST certificates, i.e. zones with none yet. A separate budget, so a
+          renewal wave never holds up onboarding.
+        type: string
+        required: false
+        default: "unlimited"
+      runs-per-day:
+        description: "This caller's warden cadence; only used to sanity-check max-renewals-per-run."
+        type: number
+        required: false
+        default: 2
+      monitor-warn-threshold:
+        # string, not number, to match reusable-monitor.yml's thresholds: these are fractions
+        # that must round-trip verbatim, and a number input would render 0.30 as 0.3.
+        description: "The monitor's warn-threshold, mirrored for the same check. Set only if you tuned it."
+        type: string
+        required: false
+        default: "0.30"
       tag-application-name:
         description: "ApplicationName tag on Key Vault objects."
         type: string
@@ -95,6 +125,9 @@ on:
       zones-failed:
         description: "Zones with a failed certificate action."
         value: ${{ jobs.warden.outputs.zones-failed }}
+      zones-deferred:
+        description: "Zones left for the next run by either budget."
+        value: ${{ jobs.warden.outputs.zones-deferred }}
       min-lifetime-fraction:
         description: "The SLO number (may be null)."
         value: ${{ jobs.warden.outputs.min-lifetime-fraction }}
@@ -112,6 +145,7 @@ jobs:
       zones-total: ${{ steps.warden.outputs.zones-total }}
       zones-managed: ${{ steps.warden.outputs.zones-managed }}
       zones-failed: ${{ steps.warden.outputs.zones-failed }}
+      zones-deferred: ${{ steps.warden.outputs.zones-deferred }}
       min-lifetime-fraction: ${{ steps.warden.outputs.min-lifetime-fraction }}
     steps:
       - name: Azure login
@@ -146,6 +180,10 @@ jobs:
           le-account-email: ${{ inputs.le-account-email }}
           force-all-new: ${{ inputs.force-all-new }}
           force-renewal: ${{ inputs.force-renewal }}
+          max-renewals-per-run: ${{ inputs.max-renewals-per-run }}
+          max-new-issuance-per-run: ${{ inputs.max-new-issuance-per-run }}
+          runs-per-day: ${{ inputs.runs-per-day }}
+          monitor-warn-threshold: ${{ inputs.monitor-warn-threshold }}
           tag-application-name: ${{ inputs.tag-application-name }}
           tag-created-by: ${{ inputs.tag-created-by }}
           metrics-output-file: ${{ steps.names.outputs.metrics-file }}

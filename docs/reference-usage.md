@@ -85,6 +85,10 @@ jobs:
       le-environment: ${{ matrix.vars.le-environment }}
       le-account-email: "certs@example.com"
       tag-application-name: "My platform (${{ matrix.environment }}) DNS zones"
+      # More than ~20 zones in an environment? See "Pacing a large fleet" below — without a cap,
+      # one renewal wave is a multi-hour job on this runner, every cycle, forever. Onboarding has
+      # its own budget, so pacing renewals never makes anyone wait for a new zone's certificate.
+      # max-renewals-per-run: 9
 ```
 
 ### `cert-warden-monitor.yml`
@@ -228,6 +232,221 @@ keeps getting evaluated normally.
 **Sweeper graduation ladder** (default-safe by design): ① dispatch dry-runs and review the
 candidate list → ② one destructive dispatch (`log_only: false`; the `max-deletions` spike
 guard stays armed) → ③ uncomment the cron. Full auto is a two-line change.
+
+## Pacing a large fleet
+
+Skip this unless an environment has more than ~20 zones. Below that, runs are short enough that
+a cap buys nothing.
+
+### The problem it solves
+
+ARI schedules renewal relative to **issuance**, so an environment whose certificates were issued
+together becomes one whose certificates *renew* together — and each renewal re-issues them
+together again. **The shape of the first issuance is the shape of every renewal wave,
+indefinitely.** Nothing about it self-corrects.
+
+At roughly 4–5 minutes per renewal, a wave of 50 zones is a multi-hour job. On a self-hosted
+runner shared with your other pipelines, that is hours of blocked unrelated work, every cycle.
+Neither force flag helps — both are all-or-nothing, and `force-renewal: true` across an
+environment is one of the ways a fleet ends up in a single wave to begin with.
+
+### Two budgets, because there are two kinds of work
+
+```yaml
+with:
+  max-renewals-per-run: 9              # zones that already hold a certificate
+  max-new-issuance-per-run: unlimited  # zones that do not (the default)
+```
+
+Each budget takes **`none`**, **`unlimited`** (the default, also when unset) or a **positive
+integer**. `0` is rejected: "max 0" reads as *zero* to most people and as *no cap* to others, and
+the two readings fail in opposite directions — guessing "none" would silently stop renewal across
+an environment. The error names both replacements.
+
+They are deliberately **separate allowances**, not one pool:
+
+| | `max-renewals-per-run` | `max-new-issuance-per-run` |
+|---|---|---|
+| Applies to | zones the vault holds a certificate for | zones with none yet |
+| Records | `renewed`, `forced` | `issued` |
+| Cost each | **~5 min** | **~1–2 min** |
+| Late means | a certificate ages toward expiry | a deploy is waiting |
+| Sizing | must drain inside the monitor's margin (below) | your call; no SLO to breach |
+
+The cost gap is the reason. Nearly all of a renewal's wall clock is lego's pre-renewal random
+sleep (uniform 0–8 minutes), and lego skips it for anything that is not a like-for-like renewal —
+so a first issuance never pays it. One shared budget would make a slot mean two very different
+amounts of time, *and* let a renewal wave hold up onboarding for days.
+
+- **A renewal wave never delays a first issuance.** Cap renewals at 3 with 28 outstanding and a
+  zone added on Monday is still live on Monday: it draws on its own allowance. (Under a single
+  shared budget it waited ~10 runs — about five days — and silently, since a zone with no
+  certificate has no lifetime fraction for the monitor to alert on.)
+- A zone's class follows **the vault, not the action**. A SAN-drift re-issue records `issued` but
+  spends renewal budget: it is maintenance of a live zone, not onboarding. It is cheap either
+  way — lego skips the sleep when the domain set changed.
+- Past a budget, a zone reaches neither Key Vault nor lego — no ACME traffic, no random delay.
+  `skipped`, `not_delegated` and `failed` cost nothing.
+- Renewals are walked **most-urgent-first** (ascending remaining validity), so the cap can only
+  ever defer a certificate with more time left than the ones it renewed.
+- **The force flags respect both budgets**, `none` included — suppression is a guarantee, not
+  advice. If you really do want everything at once, leave the budgets unset.
+- Nothing is carried between runs. Dueness is already the selector, the deferred certificates are
+  still due, and the set shrinks as they renew.
+
+Three shapes worth naming:
+
+```yaml
+# Pace a renewal wave; never make anyone wait to onboard.
+max-renewals-per-run: 9
+
+# Pace a bulk first issuance (a not-yet-issued environment); leave maintenance alone.
+max-new-issuance-per-run: 9
+
+# Onboard now, renew nothing — see "Keeping renewals on your own schedule" below.
+max-renewals-per-run: none
+```
+
+### Keeping renewals on your own schedule
+
+If your warden runs on more than one trigger — a cron *and*, say, `workflow_run` after an IaC
+deploy so a newly created zone gets its certificate in minutes rather than hours — then your real
+cadence is set by merge activity, not by you. That has three consequences worth heading off:
+
+- `runs-per-day` becomes a number you know to be wrong, so the undersized-cap advisory computes
+  against a fiction.
+- Drain time stops being predictable, so you cannot tell an operator when a backlog clears.
+- Renewals performed on deploy runs are timestamped in working hours, so ~60 days later they come
+  due in working hours — the wave re-forms around when people merge.
+
+And, most concretely: an ad-hoc run lands immediately after a deploy, which is exactly when the
+next deploy is most likely queued behind it on a shared runner.
+
+`none` resolves all four. Keep renewals on the schedule you control, and let the ad-hoc trigger do
+only the thing it exists for:
+
+```yaml
+with:
+  # Renew only on the cron; onboard on every trigger.
+  max-renewals-per-run: ${{ github.event_name == 'schedule' && 9 || 'none' }}
+  max-new-issuance-per-run: unlimited
+  runs-per-day: 2   # now literally true, so the advisory is computing against reality
+```
+
+A suppressed run is cheap — onboarding skips lego's pre-renewal sleep — and it is not silent: the
+step summary says renewals were suppressed by design, and the zones it held back are still
+recorded with their real validity window, so the monitor keeps watching them age. If you ever
+suppressed renewals on *every* trigger by mistake, `min_lifetime_fraction` would sink and alert.
+
+### Sizing the renewal cap
+
+This section is about `max-renewals-per-run` only. `max-new-issuance-per-run` needs none of it: a
+zone with no certificate has no lifetime fraction, so no onboarding backlog can trip the monitor,
+and the warden never warns about one.
+
+**The renewal cap is not free: it deliberately holds due certificates past their renewal point,
+and that is exactly what the monitor's `min_lifetime_fraction` SLO measures.** Set it too low and
+you trade one long run for days of `WARNING` cards.
+
+ARI suggests renewal at ~⅓ of lifetime remaining (0.333) and the monitor warns below 0.30, so
+the margin is the gap between where the wave is *now* and that warn threshold:
+
+```
+margin_days = (fraction_now − warn-threshold) × certificate_lifetime_days
+```
+
+`fraction_now` is the **worst deferred certificate's current** fraction, and that is the part
+that bites: the margin is widest for a wave caught exactly at its renewal point, and it collapses
+within days.
+
+| Worst deferred certificate | Margin (90-day certs, warn 0.30) |
+|---|---:|
+| exactly at the ARI point (0.333) | ~3.0 days |
+| ~1 day overdue (0.322) | ~1.8 days |
+| ~2 days overdue (0.311) | ~0.9 days |
+
+The whole wave has to drain inside that margin:
+
+```
+cap  ≥  ⌈ wave_size / (runs_per_day × margin_days) ⌉
+```
+
+| Wave size | Floor cap (twice daily, 3-day margin) | Drain | Run length at ~5 min/cert |
+|---:|---:|---:|---:|
+| 28 | 5 | 3.0 days | ~25 min |
+| 41 | 7 | 3.0 days | ~35 min |
+| 51 | 9 | 3.0 days | ~45 min |
+
+**Those are floors with no headroom** — they land exactly on the 3-day best case, so a wave you
+discover after it has already gone overdue needs a bigger cap than the table says. Aim for a
+drain of about a day and leave the arithmetic to the warden's annotation.
+
+Two corollaries worth internalising:
+
+- **The cap's floor is set by your fleet, not by your patience.** A 51-zone environment cannot be
+  paced at 3 per run without the monitor complaining — that is an 8.5-day drain against a 3-day
+  margin at best. If you want a smaller cap, you need more runs per day, not a smaller number.
+- **First issuance is the free case.** A zone with no certificate yet has no lifetime fraction to
+  sink, so the SLO cannot trip. Cap a not-yet-issued environment with
+  `max-new-issuance-per-run` as aggressively as you like.
+
+You do not have to get this right from memory: when a run defers more than it can drain in time,
+the warden annotates it with the numbers and the cap that would have fitted —
+
+```
+::warning::warden: CERT_MAX_RENEWALS_PER_RUN=3 is too small for this backlog. Draining 51
+deferred certificate(s) at 2 run(s)/day takes ~8.5 days, but z7.example.com drops below the
+monitor's warn threshold (0.30) in ~3.0 days, so the monitor will alert while the backlog is
+still draining. Raise the cap to 9 (or clear it for this wave).
+```
+
+If your callers differ from the assumed shape, tell the warden so the guard stays honest:
+`runs-per-day` (default 2) and `monitor-warn-threshold` (default 0.30 — set it if you tuned the
+monitor's).
+
+The sizing rule below applies only to a **cap**. A `none` budget has no size to get wrong, so the
+advisory never fires on a suppressed run — otherwise every ad-hoc run would carry a warning.
+
+### Watching a wave drain
+
+**`min_lifetime_fraction` cannot tell you whether a drain is working.** It tracks the worst
+*un-renewed* certificate, so it decays with the calendar rather than with progress — roughly
+0.005/day on a 90-day certificate. A multi-day drain therefore holds the SLO almost still while the
+backlog actually shrinks, and every alert in that window looks the same.
+
+So the numbers that *move* are reported alongside it, in three places:
+
+| Where | What it says |
+|---|---|
+| Warden step summary | `renewed: 3` and `deferred: 38 — 16 renewal(s) still due, 22 not yet due, 0 awaiting first issuance` |
+| Monitor step summary + Teams card | `Renewed this run: 3`, `Still due: 16`, and `Awaiting first issuance` when there is any |
+| Monitor reason line | `… — 16 still due, 3 renewed this run; draining` |
+
+That last clause is the one an operator reads first. It says `draining` when the run renewed
+something, `not draining` when it renewed nothing while certificates were due, and `renewals
+suppressed on this run by design` when the budget was `none` — so a repeated warning during a
+planned drain is something to track rather than something to mute.
+
+**Note the difference between `deferred` and *still due*.** Renewals are walked most-urgent-first,
+so healthy certificates sort last and are always deferred; a run can report 38 deferred renewals
+where only 16 are waiting. *Still due* is the number that describes a wave, and it is what the
+undersized-cap advisory sizes its estimate from.
+
+The severity verdict is untouched by any of this. A breach is a breach whether or not it is being
+worked off; the extra numbers change what you can do about it, not whether you are told.
+
+### What the cap does not cover
+
+- **A mass-revocation event.** Let's Encrypt can pull an ARI window far earlier than expiry, and
+  urgency ordering — which sorts by *expiry* — cannot see that. Clear the cap for the duration;
+  it takes effect on the next run.
+- **SAN drift on a healthy certificate.** Adding an A record needs a re-issue, but the
+  certificate's remaining validity is untouched, so it sorts late in the renewal queue and can
+  wait out a wave. It is picked up as soon as the wave drains.
+- **A Key Vault listing failure.** The pre-pass is what tells renewals from onboarding, so if it
+  fails both budgets collapse onto the most restrictive of the two — `none` on either class means
+  the run acts on nothing, and says so. Conservative on purpose: the alternative is letting a
+  failed listing produce the unbounded run the budgets exist to prevent.
 
 ## 2. Warden only (minimum viable consumer)
 

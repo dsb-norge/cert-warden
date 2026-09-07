@@ -82,9 +82,21 @@ setup() {
   export EXEC_PATH="${HARNESS}/challtestsrv-hook.sh"
   export EXEC_POLLING_INTERVAL="2"
   export EXEC_PROPAGATION_TIMEOUT="30"
+  # lego's exec provider declares itself SEQUENTIAL: with more than one DNS-01 challenge on a
+  # certificate it solves them one at a time, sleeping EXEC_SEQUENCE_INTERVAL between. That
+  # defaults to 60s (dns01.DefaultPropagationTimeout), and every certificate here carries two
+  # names (apex + wildcard, or apex + www) -- so unset it costs a flat minute per issuance or
+  # renewal, which was ~95% of this suite's wall clock. challtestsrv is in-memory and instant.
+  export EXEC_SEQUENCE_INTERVAL="1"
   export CW_LEGO_DNS_RESOLVERS="127.0.0.1:8053"
   export CW_LEGO_EXTRA_ARGS="--dns.propagation.disable-ans"
   export CW_DIG_ARGS="@127.0.0.1 -p 5354"
+  # lego sleeps a random interval before every RENEWAL to smear fleet-wide load (the single
+  # biggest contributor to a real run's wall clock — and the reason max-renewals-per-run exists).
+  # Here it is pure padding: it exercises no code path, and a renewal scenario can otherwise sit
+  # idle for minutes. lego's own env var, not a warden seam — the warden never sets it, so
+  # production keeps the smearing that Let's Encrypt asks clients for.
+  export LEGO_NO_RANDOM_SLEEP="true"
 
   # File-scoped (not per-test) so later scenarios consume earlier scenarios' metrics —
   # e2e-5 feeds e2e-4's partial-failure metrics to the monitor.
@@ -266,4 +278,295 @@ JSON
   assert_success
   run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
   assert_output "forced"
+}
+
+@test "e2e-9 renewal budget: forcing respects it, and deferred renewals keep their window" {
+  # Runs against the chaos-configured Pebble from e2e-7/8. Both zones must hold a certificate for
+  # this scenario, since the renewal budget only governs zones that already have one — so start
+  # with an uncapped run to bring zone2 (dropped back in e2e-4) into service.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  run_warden
+  assert_success
+  [ -f "${CW_STATE}/certs/le-cert-staging-cw-test-internal-pfx.json" ]
+  [ -f "${CW_STATE}/certs/le-cert-staging-zone2-cw-test-internal-pfx.json" ]
+
+  # Now both are renewals. Budget of one with force-renewal on: exactly the case that must not
+  # run away, since a forced renewal of a whole environment is how a fleet ends up renewing in a
+  # single wave in the first place.
+  : >"${CW_STATE}/calls.log"
+  CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  assert_output --partial "renewals=1"
+  assert_output --partial "renewal budget spent (1/1)"
+  # A correctly sized cap says nothing; these certificates are minutes old.
+  refute_output --partial "::warning::"
+
+  # One forced, one deferred. Which one is deliberately not asserted: both certificates are
+  # minutes old, so the urgency order between them rests on a wall-clock gap this shared-state
+  # chain does not control. Ordering is pinned deterministically, with controlled expiry
+  # fixtures, in tests/unit/warden.bats.
+  run jq -r '([.[] | select(.action == "forced")] | length) as $forced
+    | ([.[] | select(.action == "deferred")] | length) as $deferred
+    | "\($forced) \($deferred)"' "${METRICS_OUT}"
+  assert_output "1 1"
+
+  # THE property the design turns on: the deferred zone holds a certificate, so its record must
+  # carry that certificate's real validity window. Only the Key Vault pre-pass can supply it, and
+  # a null would drop the zone out of the monitor's SLO — the cap would look like a success while
+  # hiding a backlog that had stopped draining.
+  run jq -e '[.[] | select(.action == "deferred")] | length == 1 and (.[0]
+      | .days_to_expiry != null
+        and .lifetime_fraction_remaining != null
+        and .lifetime_fraction_remaining > 0.9
+        and .not_after != "")' "${METRICS_OUT}"
+  assert_success
+
+  # The deferred zone was not evaluated at all — that is where the hours are saved: no `az` call
+  # this run went near it. Matched on the Key Vault object name, NOT the zone name: zone names
+  # nest here ("cw-test.internal" is a substring of "zone2.cw-test.internal"), so a bare grep
+  # passes or fails purely on which zone got deferred (pitfall P-24). The `le-cert-staging-`
+  # prefix anchors where the zone part starts, so the object names cannot collide.
+  deferredKv="$(jq -r '.[] | select(.action == "deferred") | .kv_cert_name' "${METRICS_OUT}")"
+  run grep -c -- "${deferredKv}" "${CW_STATE}/calls.log"
+  assert_output "0"
+
+  # The budget holds across runs: force again and exactly one still moves.
+  CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  run jq -r '([.[] | select(.action == "forced")] | length) as $forced
+    | ([.[] | select(.action == "deferred")] | length) as $deferred
+    | "\($forced) \($deferred)"' "${METRICS_OUT}"
+  assert_output "1 1"
+
+  # Lift the cap and nothing is deferred: both are freshly renewed, so ARI skips them.
+  run_warden
+  assert_success
+  refute_output --partial "budget spent"
+  run jq -r '[.[] | select(.action == "deferred")] | length' "${METRICS_OUT}"
+  assert_output "0"
+}
+
+@test "e2e-10 unlimited: enumeration order and the artifact are untouched" {
+  # The compatibility guarantee, in the shape a real consumer sends it. An unconstrained run must
+  # make no Key Vault certificate listing at all and must keep Azure's enumeration order, so an
+  # existing consumer sees byte-identical behaviour down to the artifact's record order.
+  #
+  # Deliberately an EXPLICIT `unlimited` rather than an unset variable: the composite action
+  # defaults both budgets to "unlimited", so every run through the action sends the literal word,
+  # and that is the path a consumer who wants no pacing actually takes. Unset is covered too —
+  # e2e-1 through e2e-8 all run without the variable at all.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]},
+  {"name": "cw-test.internal",       "nameServers": ["ns1.cw-test.internal."]}
+]
+JSON
+  : >"${CW_STATE}/calls.log"
+  CERT_MAX_RENEWALS_PER_RUN=unlimited CERT_MAX_NEW_ISSUANCE_PER_RUN=unlimited run_warden
+  assert_success
+  assert_output --partial "renewals=unlimited, new issuance=unlimited"
+
+  # Record order follows the zone listing, NOT urgency.
+  run jq -r '[.[].zone] | join(",")' "${METRICS_OUT}"
+  assert_output "zone2.cw-test.internal,cw-test.internal"
+
+  # And the ordering pre-pass never ran.
+  run grep -c "keyvault certificate list" "${CW_STATE}/calls.log"
+  assert_output "0"
+}
+
+@test "e2e-11 onboarding budget: it paces first issuance and drains across runs" {
+  # The onboarding budget governs zones with no certificate. This is the prod shape — batching a
+  # not-yet-issued environment — and the one place a backlog genuinely drains, because an issued
+  # zone stops being uncertified and leaves the queue for good.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # Both zones back to "never issued": neither has a certificate, so neither can renew.
+  rm -f "${CW_STATE}"/certs/le-cert-staging-*-pfx.json \
+    "${CW_STATE}"/secrets/le-cert-staging-*-pfx \
+    "${CW_STATE}"/secrets/le-cert-staging-*-pfx-meta
+
+  CERT_MAX_NEW_ISSUANCE_PER_RUN=1 run_warden
+  assert_success
+  assert_output --partial "new issuance=1"
+  assert_output --partial "onboarding budget spent (1/1)"
+
+  # One issued, one deferred — the issuance consumed the whole budget. Order-agnostic: with no
+  # certificates anywhere there is no urgency to order by (see e2e-9's note).
+  run jq -r '([.[] | select(.action == "issued")] | length) as $issued
+    | ([.[] | select(.action == "deferred")] | length) as $deferred
+    | "\($issued) \($deferred)"' "${METRICS_OUT}"
+  assert_output "1 1"
+
+  # The deferred zone has NO certificate, so a null window is the honest answer here — the
+  # opposite of e2e-9's case, and the reason the monitor ignores nulls rather than alerting on
+  # them: nothing is in service for this zone that could expire. It is also why the sizing guard
+  # stays silent no matter how long an onboarding backlog gets.
+  run jq -e '[.[] | select(.action == "deferred")] | length == 1 and (.[0]
+      | .days_to_expiry == null and .lifetime_fraction_remaining == null)' "${METRICS_OUT}"
+  assert_success
+
+  # Next run picks up the zone that was deferred, and nothing is left over. Nothing was carried
+  # between runs to make that happen: the zone is simply still uncertified.
+  CERT_MAX_NEW_ISSUANCE_PER_RUN=1 run_warden
+  assert_success
+  run jq -r '([.[] | select(.action == "issued")] | length) as $issued
+    | ([.[] | select(.action == "deferred")] | length) as $deferred
+    | "\($issued) \($deferred)"' "${METRICS_OUT}"
+  assert_output "1 0"
+}
+
+@test "e2e-12 separate budgets: an exhausted renewal budget does not hold up a first issuance" {
+  # THE property the two-budget split exists for. cw-test.internal holds a certificate (so it can
+  # only renew) and zone2 holds none (so it can only be issued). Force a renewal with the renewal
+  # budget set to zero-headroom and onboarding left unlimited: the wave is paced, the newly added
+  # zone is NOT — a developer waiting on a first certificate never queues behind a renewal
+  # backlog, which is exactly what a single shared budget did.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # cw-test keeps its certificate from e2e-11; drop zone2's so it needs a first issuance.
+  rm -f "${CW_STATE}/certs/le-cert-staging-zone2-cw-test-internal-pfx.json" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx-meta"
+
+  # Renewal budget already spent by the first zone; onboarding unlimited.
+  CERT_MAX_RENEWALS_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  assert_output --partial "new issuance=unlimited"
+
+  run jq -r 'map({(.zone): .action}) | add
+    | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "forced
+issued"
+  # Nothing deferred: the two classes drew on different allowances.
+  run jq -r '[.[] | select(.action == "deferred")] | length' "${METRICS_OUT}"
+  assert_output "0"
+
+  # And the mirror image: cap onboarding, leave renewals unlimited. This is the prod
+  # first-issuance shape — pace the onboarding wave without touching maintenance.
+  rm -f "${CW_STATE}/certs/le-cert-staging-zone2-cw-test-internal-pfx.json" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx-meta"
+
+  CERT_MAX_NEW_ISSUANCE_PER_RUN=1 CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  assert_output --partial "renewals=unlimited"
+  run jq -r 'map({(.zone): .action}) | add
+    | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "forced
+issued"
+
+  # An onboarding backlog is never an alerting matter, so the sizing guard stays silent even
+  # though the onboarding budget was fully spent.
+  refute_output --partial "::warning::"
+}
+
+@test "e2e-13 renewals: none — a deploy-triggered run onboards but renews nothing" {
+  # The shape a caller needs when the warden runs on two triggers: a cron that may renew, and a
+  # post-deploy run that must not. Renewals suppressed, onboarding untouched.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # cw-test keeps its certificate (so it is renewal work); zone2 loses its (onboarding work).
+  rm -f "${CW_STATE}/certs/le-cert-staging-zone2-cw-test-internal-pfx.json" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx" \
+    "${CW_STATE}/secrets/le-cert-staging-zone2-cw-test-internal-pfx-meta"
+
+  # force-renewal is ON: even an explicit force must not override a suppressed budget, or the
+  # suppression would be advisory rather than a guarantee.
+  CERT_MAX_RENEWALS_PER_RUN=none CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  assert_output --partial "renewals=none"
+  assert_output --partial "Renewals were suppressed for this run by design"
+  # The advisory must NOT fire: a suppressed budget is a deliberate choice, not a bad size, and
+  # firing here would mean a warning on every deploy-triggered run.
+  refute_output --partial "::warning::"
+
+  run jq -r 'map({(.zone): .action}) | add
+    | .["cw-test.internal"], .["zone2.cw-test.internal"]' "${METRICS_OUT}"
+  assert_output "deferred
+issued"
+
+  # THE safety property: the suppressed zone still reports its real validity window, so the
+  # monitor keeps watching it age. Renewals switched off everywhere would sink
+  # min_lifetime_fraction and alert — suppression is visible, not invisible.
+  run jq -e '[.[] | select(.action == "deferred")] | length == 1 and (.[0]
+      | .days_to_expiry != null and .lifetime_fraction_remaining != null)' "${METRICS_OUT}"
+  assert_success
+
+  # A run that permits renewals picks it straight back up.
+  CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
+  assert_output "forced"
+}
+
+@test "e2e-14 an ambiguous budget stops the run before any certificate work" {
+  CERT_MAX_RENEWALS_PER_RUN=0 run_warden
+  assert_failure
+  assert_output --partial "is ambiguous"
+  assert_output --partial "none"
+  assert_output --partial "unlimited"
+  # Nothing was attempted: the run never reached zone enumeration.
+  refute_output --partial "Reading public DNS zones"
+}
+
+@test "e2e-15 the whole drain-visibility chain: real warden output reaches the card" {
+  # Everything from the warden writing `deferred_reason` through the artifact to the Adaptive Card
+  # the bot receives. Unit tests cover each hop against fixtures; this one uses the real artifact
+  # a real capped run just produced, which is the only way to catch a field that gets written but
+  # never read (or read under the wrong name).
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # Both zones hold a certificate, so both are renewal work; force so both are candidates.
+  run_warden
+  assert_success
+
+  # Suppress renewals: every renewal-class zone is deferred with reason `budget-none`.
+  CERT_MAX_RENEWALS_PER_RUN=none CERT_FORCE_RENEWAL=true run_warden
+  assert_success
+  run jq -r '[.[] | select(.deferred_reason == "budget-none")] | length' "${METRICS_OUT}"
+  refute_output "0"
+
+  # Now the monitor over that very artifact. FORCE_NOTIFY so a healthy fleet still posts a card.
+  local sinklog="${BATS_TEST_TMPDIR}/sink.log"
+  python3 "${HARNESS}/bot-sink/sink.py" 8026 "${sinklog}" &
+  local sinkpid=$!
+  sleep 1
+  ENV_NAME="l2" METRICS_FILE="${METRICS_OUT}" DRY_RUN="false" FORCE_NOTIFY="true" \
+    BOT_API_BASE="http://127.0.0.1:8026/api" BOT_API_AUDIENCE="api://l2-test" \
+    BOT_ALIAS="from-l2" run bash "${MONITOR_SH}"
+  kill "${sinkpid}" 2>/dev/null || true
+  assert_success
+  assert_output --partial "renewals_suppressed=true"
+
+  # The card the bot actually received carries the drain facts...
+  run jq -r '[.body.message.body[] | select(.type == "FactSet") | .facts[] | .title] | join(",")' "${sinklog}"
+  assert_output --partial "Renewed this run"
+  assert_output --partial "Still due"
+
+  # ... and reports the suppression rather than calling a deliberate no-op a stalled drain.
+  run jq -r '.body.message.body[] | select(.type == "FactSet") | .facts[]
+    | select(.title == "Renewed this run") | .value' "${sinklog}"
+  assert_output --partial "renewals suppressed"
 }

@@ -25,9 +25,37 @@ them as-is.
 | `LE_ENVIRONMENT_NAME` | no (`staging`) | `staging` or `production` |
 | `CERT_FORCE_ALL_NEW` | no (`false`) | Force new certs for all zones |
 | `CERT_FORCE_RENEWAL` | no (`false`) | Force renewal of existing certs |
+| `CERT_MAX_RENEWALS_PER_RUN` | no (`unlimited`) | Renewals/forces per run — zones the vault already holds a certificate for. `none`, `unlimited` or a positive integer; **`0` is rejected**. See [pacing](reference-usage.md#pacing-a-large-fleet) |
+| `CERT_MAX_NEW_ISSUANCE_PER_RUN` | no (`unlimited`) | The same for first issuances — zones with no certificate yet. A **separate** budget |
+| `CERT_RUNS_PER_DAY` | no (`2`) | The caller's warden cadence; only feeds the renewal cap's sizing guard |
+| `CERT_MONITOR_WARN_THRESHOLD` | no (`0.30`) | Mirror of the monitor's `WARN_THRESHOLD`; only feeds the same guard |
 | `CERT_METRICS_OUTPUT_FILE` | no | Where the metrics artifact is written |
 
+An unparsable value for any of the pacing variables **fails the run**. That is deliberate: a
+typo'd cap silently reading as "unlimited" reinstates exactly the multi-hour, runner-blocking run
+the cap exists to prevent, and it would do so at the worst possible moment.
+
+**`0` is rejected rather than mapped to a meaning.** It is the one value with a genuinely split
+reading — "max zero" says *none* to most people, *no cap* to others — and the two readings fail in
+opposite directions. Guessing "none" stops certificate renewal across an environment with no
+error, no failed zone and a green run. The error names both replacements. Negative values are
+rejected for the same reason: `-1` conventionally means "no limit" elsewhere, the opposite of what
+anyone would intend here.
+
+**The two budgets are independent, and a zone's class follows the vault, not the recorded
+action.** A zone the vault holds a certificate for draws on `CERT_MAX_RENEWALS_PER_RUN`; a zone it
+does not draws on `CERT_MAX_NEW_ISSUANCE_PER_RUN`. So a SAN-drift re-issue records `issued` but
+spends renewal budget — correct, because it is maintenance of a zone already in service. If the
+Key Vault pre-pass fails there is nothing to classify on, and both budgets collapse onto the
+**smallest** cap that is set: conservative by design, since the alternative is letting a failed
+listing produce an unbounded run.
+
 ### monitor (`actions/monitor/monitor.sh`)
+
+Outputs include the drain pair — `renewed-count` and `still-due-count` — alongside
+`severity`, `min-lifetime-fraction`, `managed-count`, `failed-count`, `worst-zone`,
+`awaiting-issuance-count`, `renewals-suppressed`, `reasons-json`, `notified` and
+`notify-http-status`. All are emitted **empty** under `UNKNOWN`.
 
 `METRICS_FILE`, `ENV_NAME`, `WARN_THRESHOLD` (0.30), `PAGE_THRESHOLD` (0.15),
 `LIVENESS_WINDOW_HOURS` (36), `CERT_WARDEN_CONCLUSION`, `CERT_WARDEN_RUN_URL`,
@@ -68,6 +96,41 @@ JSON array, one record per zone; formal schema in
 [`contracts/metrics.schema.json`](../contracts/metrics.schema.json) (validated by the unit
 suite). The warden writes it **even when the run fails partially** — a failed zone must still
 produce a record; that guarantee is regression-tested at every layer.
+
+### The `action` vocabulary
+
+`issued | renewed | forced | skipped | failed | not_delegated | deferred`.
+
+`deferred` means the budget for that zone's class was spent before the zone was reached, or was
+set to `none`: the zone was **not evaluated**, and the next run that permits its class takes it.
+`deferred_reason` says which (`budget-spent` / `budget-none`).
+
+**A deferred record is not automatically a backlog.** Renewals are walked most-urgent-first, so
+healthy certificates sort last and are always deferred — a run can report dozens of deferred
+renewals while only a handful are actually waiting. Anything sizing a wave has to filter, and
+`cw_is_due` in [`lib/helpers.bash`](../lib/helpers.bash) is the shared definition for it: lego's
+own renewal rule (a third of the lifetime remaining, or a half below a 10-day lifetime) applied to
+the record's own numbers. The warden's advisory and the monitor's card both use it, so they cannot
+disagree about the size of a wave. It is **reporting only** — dueness for the purpose of actually
+renewing is still ARI's decision, inside lego. Which budget applies is derivable
+from the record — a deferred renewal carries a validity window, a deferred first issuance has
+none. It is a healthy state, not
+a finding — but note what that does and does not mean for the monitor:
+
+- The monitor is **action-blind for the SLO**. It never branches on `deferred`; it keys on
+  `lifetime_fraction_remaining`. So there is nothing to "teach" it, and nothing to special-case.
+- Deferred records therefore carry the **Key Vault validity window**, giving them a real
+  `days_to_expiry` and `lifetime_fraction_remaining`. This is load-bearing. A null there would
+  drop the zone out of `min_lifetime_fraction` entirely, and the run would look healthier the
+  more certificates it declined to touch — a backlog that stopped draining would go unnoticed.
+- The flip side is that a cap **deliberately holds certificates past their renewal point**,
+  which is precisely what the SLO measures. A cap sized too small for the wave therefore trips
+  the monitor's `WARNING` while draining. The warden predicts that and annotates the run; the
+  sizing rule is in [reference-usage.md](reference-usage.md#sizing-the-renewal-cap).
+
+Adding `deferred` was a **minor** bump: no consumer branches on the action except to recognise
+`failed` and `not_delegated`, and a `deferred` record is deliberately neither. A consumer that
+validates the artifact against a pinned older copy of the schema must bump it.
 
 The reusable warden workflow uploads it as artifact
 `cert-warden-metrics-<environment>-<run_id>-<run_attempt>`; the reusable monitor workflow

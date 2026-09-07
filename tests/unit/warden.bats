@@ -55,6 +55,143 @@ setup() {
   [ "${digArgs}" = "@127.0.0.1 -p 5354" ]
 }
 
+@test "normalizeBudget accepts the vocabulary, in any case or spacing" {
+  source "${WARDEN_SH}"
+  run normalizeBudget "" X
+  assert_output "unlimited 0"
+  run normalizeBudget "unlimited" X
+  assert_output "unlimited 0"
+  run normalizeBudget "none" X
+  assert_output "none 0"
+  run normalizeBudget "3" X
+  assert_output "capped 3"
+  # These arrive through GitHub Actions expressions, so tolerate case and stray spacing.
+  run normalizeBudget " NONE " X
+  assert_output "none 0"
+  run normalizeBudget "Unlimited" X
+  assert_output "unlimited 0"
+}
+
+# `0` is the one value with a genuinely split reading, and the two readings fail in opposite
+# directions — guessing "none" silently stops renewal across an environment. It is rejected rather
+# than mapped, and the error has to name BOTH replacements or it just moves the guesswork.
+@test "normalizeBudget rejects 0 as ambiguous and says what to write instead" {
+  run bash -c "set -euo pipefail; source '${WARDEN_SH}'; normalizeBudget 0 CERT_MAX_RENEWALS_PER_RUN"
+  assert_failure
+  assert_output --partial "CERT_MAX_RENEWALS_PER_RUN='0' is ambiguous"
+  assert_output --partial "none"
+  assert_output --partial "unlimited"
+}
+
+# -1 conventionally means "no limit" elsewhere, which is the opposite of what it would do here.
+@test "normalizeBudget rejects negatives and nonsense" {
+  local bad
+  for bad in "-1" "five" "3.5" "1e3" "none-ish"; do
+    run bash -c "set -euo pipefail; source '${WARDEN_SH}'; normalizeBudget '${bad}' CERT_MAX_RENEWALS_PER_RUN"
+    assert_failure
+    assert_output --partial "must be 'none', 'unlimited' or a positive integer"
+  done
+}
+
+# The error must be VISIBLE. normalizeBudget is called through command substitution, so anything
+# it writes to stdout is captured into the caller's variable instead of shown (P-22).
+@test "normalizeBudget errors reach the operator, not the caller's variable" {
+  run bash -c "set -euo pipefail; source '${WARDEN_SH}'; captured=\$(normalizeBudget 0 X 2>/dev/null) || true; echo \"CAPTURED=[\${captured}]\""
+  refute_output --partial "ambiguous"
+  assert_output --partial "CAPTURED=[]"
+}
+
+@test "loadConfig: both budgets are unlimited by default" {
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${renewalBudgetMode}" = unlimited ]
+  [ "${newIssuanceBudgetMode}" = unlimited ]
+  [ "${wardenRunsPerDay}" -eq 2 ]
+  [ "${monitorWarnThreshold}" = "0.30" ]
+}
+
+@test "loadConfig: the budgets are independent" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${renewalBudgetMode}" = capped ]
+  [ "${maxRenewalsPerRun}" -eq 3 ]
+  [ "${newIssuanceBudgetMode}" = unlimited ] # capping renewals must NOT cap onboarding
+
+  # THE case this encoding exists for: renew nothing, onboard freely.
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="unlimited"
+  loadConfig
+  [ "${renewalBudgetMode}" = none ]
+  [ "${newIssuanceBudgetMode}" = unlimited ]
+
+  # ... and the mirror image, for pacing a bulk first issuance.
+  export CERT_MAX_RENEWALS_PER_RUN="unlimited"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="9"
+  loadConfig
+  [ "${renewalBudgetMode}" = unlimited ]
+  [ "${newIssuanceBudgetMode}" = capped ]
+  [ "${maxNewIssuancePerRun}" -eq 9 ]
+}
+
+@test "loadConfig: an empty budget reads as unlimited" {
+  # A caller wiring the input from a matrix var that the entry omits renders an EMPTY string,
+  # not a missing variable. That must read as unlimited, never as a parse failure.
+  export CERT_MAX_RENEWALS_PER_RUN=""
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN=""
+  export CERT_RUNS_PER_DAY=""
+  export CERT_MONITOR_WARN_THRESHOLD=""
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${renewalBudgetMode}" = unlimited ]
+  [ "${newIssuanceBudgetMode}" = unlimited ]
+  [ "${wardenRunsPerDay}" -eq 2 ]
+  [ "${monitorWarnThreshold}" = "0.30" ]
+}
+
+@test "loadConfig: a rejected budget stops the run before any certificate work" {
+  run bash -c "set -euo pipefail; export CERT_MAX_RENEWALS_PER_RUN=0; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  refute_output --partial "REACHED"
+  run bash -c "set -euo pipefail; export CERT_MAX_NEW_ISSUANCE_PER_RUN=lots; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  assert_output --partial "CERT_MAX_NEW_ISSUANCE_PER_RUN must be"
+  refute_output --partial "REACHED"
+}
+
+@test "loadConfig: the sizing-guard inputs are configurable" {
+  export CERT_RUNS_PER_DAY="4"
+  export CERT_MONITOR_WARN_THRESHOLD="0.25"
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${wardenRunsPerDay}" -eq 4 ]
+  [ "${monitorWarnThreshold}" = "0.25" ]
+}
+
+@test "describeBudget renders each mode as the word an operator would have written" {
+  source "${WARDEN_SH}"
+  run describeBudget none 0
+  assert_output "none"
+  run describeBudget unlimited 0
+  assert_output "unlimited"
+  run describeBudget capped 7
+  assert_output "7"
+}
+
+@test "loadConfig: the sizing-guard inputs are validated too" {
+  run bash -c "set -euo pipefail; export CERT_RUNS_PER_DAY='0'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  assert_output --partial "CERT_RUNS_PER_DAY must be a positive integer"
+
+  # A bare ".30" is rejected on purpose: it reaches jq as --argjson and is not valid JSON.
+  run bash -c "set -euo pipefail; export CERT_MONITOR_WARN_THRESHOLD='.30'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+  assert_output --partial "CERT_MONITOR_WARN_THRESHOLD must be a fraction"
+
+  run bash -c "set -euo pipefail; export CERT_MONITOR_WARN_THRESHOLD='30'; source '${WARDEN_SH}'; loadConfig; echo REACHED"
+  assert_failure
+}
+
 @test "getCommonLegoRunOptions honours the seams" {
   export CW_ACME_DIRECTORY_URL="https://localhost:14000/dir"
   export CW_LEGO_DNS_PROVIDER="exec"
@@ -101,6 +238,21 @@ setup() {
   assert_output --partial "ON"
 }
 
+@test "zoneCertKvSecretName derives the Key Vault object name from zone + LE environment" {
+  source "${WARDEN_SH}"
+  loadConfig
+  run zoneCertKvSecretName "a.example.test"
+  assert_output "le-cert-staging-a-example-test-pfx"
+  # The derivation must match the one the zone body uses, for every dot in the zone.
+  run zoneCertKvSecretName "deep.sub.example.test"
+  assert_output "le-cert-staging-deep-sub-example-test-pfx"
+
+  export LE_ENVIRONMENT_NAME="production"
+  loadConfig
+  run zoneCertKvSecretName "a.example.test"
+  assert_output "le-cert-production-a-example-test-pfx"
+}
+
 @test "recordCertMetric writes a monitor-safe failed record" {
   source "${WARDEN_SH}"
   loadConfig # recordCertMetric labels records with the LE environment from config
@@ -120,6 +272,80 @@ setup() {
     and .[0].error == "simulated failure"
     and .[0].lifetime_fraction_remaining == null
   ' "${metricsFile}"
+  assert_success
+}
+
+# A zone the run declines to walk has no PEM on disk, so the validity window has to arrive as
+# arguments. The point of the exercise is lifetime_fraction_remaining: it is the monitor's SLO
+# input, and a record that reported null there would silently drop the zone out of the alert.
+@test "recordCertMetric derives the validity window from fallback dates (no PEM)" {
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="fallback.example.test"
+  certKvPfxSecretName="le-cert-staging-fallback-example-test-pfx"
+
+  # A 90-day certificate, 60 days in: ~30 days left, ~1/3 of its lifetime remaining. Key
+  # Vault's own ISO-8601-with-offset rendering, deliberately, not OpenSSL's format.
+  nb="$(date -u -d '60 days ago' +'%Y-%m-%dT%H:%M:%S+00:00')"
+  na="$(date -u -d '30 days' +'%Y-%m-%dT%H:%M:%S+00:00')"
+  recordCertMetric "deferred" "-" "" "${nb}" "${na}"
+
+  run jq -s -e '
+    .[0].action == "deferred"
+    and .[0].error == ""
+    and .[0].kv_cert_name == "le-cert-staging-fallback-example-test-pfx"
+    and .[0].days_to_expiry >= 29 and .[0].days_to_expiry <= 30
+    and (.[0].lifetime_fraction_remaining > 0.32 and .[0].lifetime_fraction_remaining < 0.34)
+  ' "${metricsFile}"
+  assert_success
+}
+
+@test "recordCertMetric leaves the window null when no dates are available at all" {
+  # The degraded path: the pre-pass listing failed, so a deferred record has no window. It must
+  # still be a well-formed record (and must NOT invent a date from an empty `date -d`).
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="nowindow.example.test"
+  certKvPfxSecretName="le-cert-staging-nowindow-pfx"
+  run bash -c "
+    set -euo pipefail
+    source '${WARDEN_SH}'; loadConfig
+    metricsFile='${metricsFile}'; zoneName='nowindow.example.test'; certKvPfxSecretName='x-pfx'
+    recordCertMetric 'deferred' '-' '' '' ''
+    echo SURVIVED
+  "
+  assert_success
+  assert_output --partial "SURVIVED"
+  run jq -s -e '
+    .[0].action == "deferred"
+    and .[0].days_to_expiry == null
+    and .[0].lifetime_fraction_remaining == null
+    and .[0].not_after == ""
+  ' "${metricsFile}"
+  assert_success
+}
+
+# A readable PEM must keep winning over any fallback: the served certificate is the truth, the
+# Key Vault attributes are only a stand-in for when it was never fetched.
+@test "recordCertMetric prefers the PEM over fallback dates" {
+  source "${WARDEN_SH}"
+  loadConfig
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+    -keyout "${BATS_TEST_TMPDIR}/k.pem" -out "${BATS_TEST_TMPDIR}/c.pem" \
+    -days 10 -subj "/CN=pem.example.test" >/dev/null 2>&1
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="pem.example.test"
+  certKvPfxSecretName="le-cert-staging-pem-pfx"
+  # Fallbacks describe a wildly different (1-year) certificate; the PEM's 10 days must win.
+  recordCertMetric "renewed" "${BATS_TEST_TMPDIR}/c.pem" "" \
+    "$(date -u -d '1 year ago' +'%Y-%m-%dT%H:%M:%S+00:00')" \
+    "$(date -u -d '1 year' +'%Y-%m-%dT%H:%M:%S+00:00')"
+  run jq -s -e '.[0].days_to_expiry <= 10 and .[0].serial != ""' "${metricsFile}"
   assert_success
 }
 
@@ -237,5 +463,495 @@ AZSTUB
   assert_success
   assert_output --partial "SURVIVED"
   run jq -s -e '.[0].san == [] and .[0].days_to_expiry != null' "${metricsFile}"
+  assert_success
+}
+
+# --- run pacing: zone order + validity-window cache -------------------------------------------
+# The cap makes the walk order load-bearing (it decides WHICH certificates renew), so the order
+# is asserted directly rather than left to whatever Azure's listing happens to return.
+
+# Stub `az keyvault certificate list` with a fixed answer; every other az call fails loudly.
+stub_az_cert_list() {
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  cat >"${BATS_TEST_TMPDIR}/bin/az" <<AZSTUB
+#!/usr/bin/env bash
+if [[ "\${1} \${2} \${3}" == "keyvault certificate list" ]]; then
+  cat "${BATS_TEST_TMPDIR}/certlist.json"
+  exit 0
+fi
+echo "unexpected az call: \$*" >&2
+exit 1
+AZSTUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+}
+
+@test "resolveZoneProcessingOrder sorts most-urgent-first and puts uncertified zones last" {
+  source "${WARDEN_SH}"
+  loadConfig
+  # b expires first, then a; c has no certificate at all. Enumeration order is deliberately
+  # neither alphabetical nor urgency order, so a pass-through would be visible.
+  publicZonesJson='[{"name":"a.example.test"},{"name":"c.example.test"},{"name":"b.example.test"}]'
+  cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
+[
+  {"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00"},
+  {"name":"le-cert-staging-b-example-test-pfx","nbf":"2026-05-01T00:00:00+00:00","exp":"2026-10-01T00:00:00+00:00"},
+  {"name":"le-cert-staging-unrelated-pfx","nbf":"2026-01-01T00:00:00+00:00","exp":"2026-02-01T00:00:00+00:00"}
+]
+JSON
+  stub_az_cert_list
+  resolveZoneProcessingOrder
+
+  # Urgency order: b (Oct) -> a (Nov) -> c (no cert, nothing in service to lose).
+  run echo "${zoneProcessingOrder[*]}"
+  assert_output "b.example.test a.example.test c.example.test"
+
+  # ... and the validity windows are cached for the deferred records to use.
+  [ "${zoneCertNotAfter["b.example.test"]}" = "2026-10-01T00:00:00+00:00" ]
+  [ "${zoneCertNotBefore["a.example.test"]}" = "2026-06-01T00:00:00+00:00" ]
+  [ -z "${zoneCertNotAfter["c.example.test"]}" ]
+  # An unrelated vault certificate must not leak into the run.
+  [ "${#zoneProcessingOrder[@]}" -eq 3 ]
+}
+
+@test "resolveZoneProcessingOrder degrades to enumeration order when the listing fails" {
+  # A failed listing must not stop the warden maintaining certificates: it costs the ordering
+  # and the deferred records' validity window for one run, nothing more.
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"a.example.test"},{"name":"c.example.test"},{"name":"b.example.test"}]'
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"${BATS_TEST_TMPDIR}/bin/az"
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+
+  run resolveZoneProcessingOrder
+  assert_success
+  assert_output --partial "Could not list certificates in KeyVault"
+
+  resolveZoneProcessingOrder
+  run echo "${zoneProcessingOrder[*]}"
+  assert_output "a.example.test c.example.test b.example.test"
+  [ -z "${zoneCertNotAfter["a.example.test"]:-}" ]
+}
+
+@test "resolveZoneProcessingOrder rejects a non-array listing rather than silently emptying" {
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"a.example.test"},{"name":"b.example.test"}]'
+  echo '{"error":"throttled"}' >"${BATS_TEST_TMPDIR}/certlist.json"
+  stub_az_cert_list
+
+  run resolveZoneProcessingOrder
+  assert_success
+  assert_output --partial "Could not list certificates in KeyVault"
+  resolveZoneProcessingOrder
+  [ "${#zoneProcessingOrder[@]}" -eq 2 ]
+}
+
+@test "resolveZoneProcessingOrder survives a resource group with no zones" {
+  # An empty zone list must not trip `set -u` on the array expansion in main's loop.
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[]'
+  echo '[]' >"${BATS_TEST_TMPDIR}/certlist.json"
+  stub_az_cert_list
+  run bash -c "
+    set -euo pipefail
+    source '${WARDEN_SH}'; loadConfig
+    publicZonesJson='[]'
+    export PATH='${BATS_TEST_TMPDIR}/bin:${PATH}'
+    resolveZoneProcessingOrder
+    for z in \"\${zoneProcessingOrder[@]}\"; do echo \"zone: \${z}\"; done
+    echo SURVIVED
+  "
+  assert_success
+  assert_output --partial "SURVIVED"
+  refute_output --partial "zone: "
+}
+
+@test "resolveZoneProcessingOrder maps zones to Key Vault names per the LE environment" {
+  # Same zones, production environment: the staging certificates must not match.
+  export LE_ENVIRONMENT_NAME="production"
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"a.example.test"}]'
+  cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
+[{"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00"}]
+JSON
+  stub_az_cert_list
+  resolveZoneProcessingOrder
+  [ -z "${zoneCertNotAfter["a.example.test"]}" ]
+}
+
+@test "the deferred action is part of the shipped metrics contract" {
+  # The monitor is action-blind for the SLO, but a consumer validating the artifact against the
+  # schema must accept a deferred record.
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="deferred.example.test"
+  certKvPfxSecretName="le-cert-staging-deferred-example-test-pfx"
+  recordCertMetric "deferred" "-" "" \
+    "$(date -u -d '60 days ago' +'%Y-%m-%dT%H:%M:%S+00:00')" \
+    "$(date -u -d '30 days' +'%Y-%m-%dT%H:%M:%S+00:00')"
+
+  schema="${REPO_ROOT}/contracts/metrics.schema.json"
+  run jq -e --slurpfile schema "${schema}" -s '
+    ($schema[0].items.required) as $req
+    | ($schema[0].items.properties.action.enum) as $actions
+    | all(.[]; . as $rec | ($req | all(. as $k | $rec | has($k))) and (($actions | index($rec.action)) != null))
+  ' "${metricsFile}"
+  assert_success
+}
+
+# --- run pacing: the cap's sizing guard -------------------------------------------------------
+# A cap holds due certificates past their ARI renewal point, which is precisely what the
+# monitor's min_lifetime_fraction SLO measures. Sized well nobody hears about it; sized badly one
+# long run becomes days of warning cards. The guard predicts which of the two you configured.
+
+# Deferred fixture: a certificate `lifetime_days` long that is `age_days` old, i.e. still due.
+deferred_record() {
+  local zone="$1" lifetime="$2" age="$3"
+  local dte frac
+  dte=$((lifetime - age))
+  frac=$(awk "BEGIN{printf \"%.4f\", ${dte}/${lifetime}}")
+  jq -n -c --arg z "${zone}" --argjson dte "${dte}" --argjson frac "${frac}" \
+    '{zone:$z, kv_cert_name:("le-cert-staging-" + $z), action:"deferred", days_to_expiry:$dte,
+      lifetime_fraction_remaining:$frac, error:""}'
+}
+
+@test "warnIfCapCannotDrain says nothing when no cap is configured" {
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    "$(deferred_record "a.example.test" 90 62)"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "warnIfCapCannotDrain says nothing when the cap drains inside the monitor's margin" {
+  # 28 certificates just past due (90-day, 61 days old => fraction 0.322, ~1.9 days of margin
+  # before 0.30). Cap 20 at twice daily drains in 0.5 days: comfortably inside.
+  export CERT_MAX_RENEWALS_PER_RUN="20"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=()
+  for i in $(seq 1 28); do recs+=("$(deferred_record "z${i}.example.test" 90 61)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+# The headline case from the request that prompted this feature: 51 certificates in one wave with
+# a cap of 3 needs ~8.5 days at twice daily, and the fleet has ~3 days before the monitor warns.
+@test "warnIfCapCannotDrain warns, and recommends a cap that fits, when the drain is too slow" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=()
+  for i in $(seq 1 51); do recs+=("$(deferred_record "z${i}.example.test" 90 60)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  assert_output --partial "::warning::"
+  assert_output --partial "CERT_MAX_RENEWALS_PER_RUN=3 is too small"
+  assert_output --partial "Draining 51 deferred renewal(s) at 2 run(s)/day takes ~8.5 days"
+  assert_output --partial "warn threshold (0.30)"
+  # 51 certificates, ~3 days of margin, 2 runs/day => 9 per run.
+  assert_output --partial "Raise the cap to 9"
+  # Annotations cannot span lines — silence the load/config chatter so wc sees only the warning.
+  run bash -c "{ source '${WARDEN_SH}'; loadConfig; } >/dev/null; warnIfCapCannotDrain '${BATS_TEST_TMPDIR}/m.json' | wc -l"
+  assert_output "1"
+}
+
+@test "warnIfCapCannotDrain names the most urgent deferred certificate, not the first" {
+  export CERT_MAX_RENEWALS_PER_RUN="1"
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    "$(deferred_record "healthy.example.test" 90 58)" \
+    "$(deferred_record "urgent.example.test" 90 84)" \
+    "$(deferred_record "middling.example.test" 90 61)"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_output --partial "urgent.example.test"
+  refute_output --partial "healthy.example.test"
+}
+
+@test "warnIfCapCannotDrain tells the operator to clear the cap when the margin is already gone" {
+  # Already below the warn threshold: there is no margin left to size a cap against, so the
+  # recommendation degenerates to "move the whole backlog now".
+  export CERT_MAX_RENEWALS_PER_RUN="2"
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    "$(deferred_record "a.example.test" 90 70)" \
+    "$(deferred_record "b.example.test" 90 71)" \
+    "$(deferred_record "c.example.test" 90 72)"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_output --partial "::warning::"
+  assert_output --partial "in ~0.0 days"
+  assert_output --partial "Raise the cap to 3"
+}
+
+@test "warnIfCapCannotDrain is silent when nothing was deferred" {
+  export CERT_MAX_RENEWALS_PER_RUN="5"
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    '{"zone":"a.example.test","kv_cert_name":"x","action":"renewed","days_to_expiry":89,"lifetime_fraction_remaining":0.99,"error":""}'
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "warnIfCapCannotDrain cannot judge deferred records without a validity window" {
+  # The degraded pre-pass path: no window means no honest prediction, so stay quiet rather than
+  # guess -- but do not crash on the arithmetic either (a null would divide by zero).
+  export CERT_MAX_RENEWALS_PER_RUN="1"
+  source "${WARDEN_SH}"
+  loadConfig
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" \
+    '{"zone":"a.example.test","kv_cert_name":"x","action":"deferred","days_to_expiry":null,"lifetime_fraction_remaining":null,"error":""}'
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "warnIfCapCannotDrain honours a tuned cadence and warn threshold" {
+  # A consumer running four times a day drains twice as fast, so the same cap that warns at
+  # twice-daily must not warn here.
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  export CERT_RUNS_PER_DAY="4"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=()
+  for i in $(seq 1 6); do recs+=("$(deferred_record "z${i}.example.test" 90 61)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  refute_output --partial "::warning::"
+
+  # A consumer that lowered the monitor's warn threshold has more margin, so the same backlog
+  # that would warn at 0.30 must not warn at 0.20.
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  export CERT_RUNS_PER_DAY="2"
+  export CERT_MONITOR_WARN_THRESHOLD="0.20"
+  loadConfig
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  refute_output --partial "::warning::"
+  assert_success
+}
+
+# --- run pacing: which budget a zone draws on -------------------------------------------------
+# A zone's class is "does the vault already hold a certificate for it". That is what keeps a
+# renewal wave from holding up a first issuance: the two classes never share an allowance.
+
+@test "zoneBudgetFor sends certified zones to the renewal budget and the rest to onboarding" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="9"
+  source "${WARDEN_SH}"
+  loadConfig
+  zoneClassificationAvailable=true
+  zoneCertNotAfter=(["has-cert.example.test"]="2026-10-01T00:00:00+00:00")
+  certificateRenewalCount=1
+  certificateIssuanceCount=4
+
+  run zoneBudgetFor "has-cert.example.test"
+  assert_output "renewal capped 1 3"
+  run zoneBudgetFor "brand-new.example.test"
+  assert_output "onboarding capped 4 9"
+}
+
+# THE property the split exists for: an exhausted renewal budget must leave onboarding untouched,
+# so a developer waiting on a first certificate is never queued behind a wave.
+@test "zoneBudgetFor: an exhausted renewal budget does not block onboarding" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  zoneClassificationAvailable=true
+  zoneCertNotAfter=(["old.example.test"]="2026-10-01T00:00:00+00:00")
+  certificateRenewalCount=3 # renewal budget fully spent
+  certificateIssuanceCount=0
+
+  run zoneBudgetFor "old.example.test"
+  assert_output "renewal capped 3 3" # spent >= limit -> the caller defers this one
+  run zoneBudgetFor "new.example.test"
+  assert_output "onboarding unlimited 0 0" # issued regardless of the wave
+}
+
+# The whole point of `none`: a deploy-triggered run onboards but renews nothing.
+@test "zoneBudgetFor: 'none' suppresses one class and leaves the other alone" {
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  source "${WARDEN_SH}"
+  loadConfig
+  zoneClassificationAvailable=true
+  zoneCertNotAfter=(["old.example.test"]="2026-10-01T00:00:00+00:00")
+
+  run zoneBudgetFor "old.example.test"
+  assert_output "renewal none 0 0" # nothing spent, nothing permitted
+  run zoneBudgetFor "new.example.test"
+  assert_output "onboarding unlimited 0 0"
+}
+
+@test "zoneBudgetFor collapses to the most restrictive budget when classification is unavailable" {
+  # A failed pre-pass leaves nothing to classify on. Collapsing onto the MOST RESTRICTIVE of the
+  # two can act on less than strictly necessary, but it can never turn the failure into the
+  # unbounded multi-hour run the budgets exist to prevent.
+  export CERT_MAX_RENEWALS_PER_RUN="7"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="2"
+  source "${WARDEN_SH}"
+  loadConfig
+  zoneClassificationAvailable=false
+  certificateRenewalCount=1
+  certificateIssuanceCount=1
+  run zoneBudgetFor "anything.example.test"
+  assert_output "combined capped 2 2" # spend is pooled, limit is min(7, 2)
+
+  # One capped, one unlimited -> the cap governs everything.
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="unlimited"
+  loadConfig
+  zoneClassificationAvailable=false
+  certificateRenewalCount=0
+  certificateIssuanceCount=0
+  run zoneBudgetFor "anything.example.test"
+  assert_output "combined capped 0 7"
+
+  # `none` on EITHER class wins: unable to tell them apart, the run must not act on the class it
+  # was told to suppress, so it acts on nothing.
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  export CERT_MAX_NEW_ISSUANCE_PER_RUN="unlimited"
+  loadConfig
+  zoneClassificationAvailable=false
+  run zoneBudgetFor "anything.example.test"
+  assert_output "combined none 0 0"
+
+  # Neither constrained -> unlimited, exactly as before the feature existed.
+  export CERT_MAX_RENEWALS_PER_RUN="unlimited"
+  loadConfig
+  zoneClassificationAvailable=false
+  run zoneBudgetFor "anything.example.test"
+  assert_output "combined unlimited 0 0"
+}
+
+# The guard polices the RENEWAL budget. Onboarding zones carry no validity window, cannot sink the
+# monitor's SLO, and must not inflate the drain estimate — before the split they did, which would
+# have produced a warning about a backlog that was not actually renewal work.
+@test "warnIfCapCannotDrain ignores deferred onboarding zones when sizing the drain" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=()
+  # 6 deferred renewals: 2 runs at cap 3, well inside the margin -> silent.
+  local i
+  for i in $(seq 1 6); do recs+=("$(deferred_record "r${i}.example.test" 90 61)"); done
+  # 40 deferred onboarding zones. Pooled with the renewals these would read as a 46-strong
+  # backlog (~8 days) and warn.
+  for i in $(seq 1 40); do
+    recs+=("$(jq -n -c --arg z "n${i}.example.test" \
+      '{zone:$z, kv_cert_name:("le-cert-staging-" + $z), action:"deferred",
+        days_to_expiry:null, lifetime_fraction_remaining:null, error:""}')")
+  done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+# With renewals suppressed the backlog never drains, so the drain estimate is infinite and the
+# advisory would fire on EVERY such run — precisely the alert churn it was written to prevent. A
+# caller deliberately keeping renewals off one trigger is not a misconfiguration.
+@test "warnIfCapCannotDrain stays silent when renewals are suppressed" {
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=() i
+  # A backlog that would scream under any cap: 51 certificates already past due.
+  for i in $(seq 1 51); do recs+=("$(deferred_record "z${i}.example.test" 90 70)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "warnIfCapCannotDrain still warns when the budget is a real cap" {
+  # The same backlog under a cap must still be reported — suppression is the exemption, not
+  # "deferred renewals are never worth mentioning".
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=() i
+  for i in $(seq 1 51); do recs+=("$(deferred_record "z${i}.example.test" 90 70)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_output --partial "::warning::"
+  assert_output --partial "CERT_MAX_RENEWALS_PER_RUN=3 is too small"
+}
+
+# THE finding this fixes: renewals are walked most-urgent-first, so healthy certificates sort last
+# and are always deferred. Counting them as backlog sizes the wave from the whole fleet — a real
+# run reported 38 deferred renewals where 16 were waiting and 22 had been renewed days earlier,
+# which recommended a cap of 38 for a 16-certificate backlog.
+@test "warnIfCapCannotDrain sizes the wave from DUE renewals, not every deferred one" {
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=() i
+  # 16 genuinely waiting (90-day certificates, 64 days old -> fraction ~0.29).
+  for i in $(seq 1 16); do recs+=("$(deferred_record "due${i}.example.test" 90 64)"); done
+  # 22 renewed three days ago and good for months. Deferred only because they sort last.
+  for i in $(seq 1 22); do recs+=("$(deferred_record "fresh${i}.example.test" 90 3)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_output --partial "::warning::"
+  # 16, not 38 — and the recommended cap follows the same number.
+  assert_output --partial "Draining 16 deferred renewal(s)"
+  refute_output --partial "Draining 38"
+  # The margin is genuinely gone (fraction 0.29 is already below warn 0.30), so "move the whole
+  # remaining backlog" is correct advice — but it must be the real backlog.
+  assert_output --partial "Raise the cap to 16"
+}
+
+@test "warnIfCapCannotDrain stays silent when every deferred renewal is healthy" {
+  # The fleet is fine; the run simply never reached the far end of the walk. Nothing to advise.
+  export CERT_MAX_RENEWALS_PER_RUN="3"
+  source "${WARDEN_SH}"
+  loadConfig
+  local recs=() i
+  for i in $(seq 1 38); do recs+=("$(deferred_record "fresh${i}.example.test" 90 3)"); done
+  write_metrics_fixture "${BATS_TEST_TMPDIR}/m.json" "${recs[@]}"
+
+  run warnIfCapCannotDrain "${BATS_TEST_TMPDIR}/m.json"
+  assert_success
+  refute_output --partial "::warning::"
+}
+
+@test "recordCertMetric carries why a zone was deferred" {
+  source "${WARDEN_SH}"
+  loadConfig
+  metricsFile="${BATS_TEST_TMPDIR}/m.json"
+  : >"${metricsFile}"
+  zoneName="z.example.test"
+  certKvPfxSecretName="le-cert-staging-z-pfx"
+  recordCertMetric "deferred" "-" "" "" "" "budget-none"
+  recordCertMetric "deferred" "-" "" "" "" "budget-spent"
+  recordCertMetric "skipped" "-" ""
+
+  run jq -s -e '.[0].deferred_reason == "budget-none"
+    and .[1].deferred_reason == "budget-spent"
+    and .[2].deferred_reason == ""' "${metricsFile}"
+  assert_success
+
+  # And it stays inside the shipped contract.
+  schema="${REPO_ROOT}/contracts/metrics.schema.json"
+  run jq -e --slurpfile schema "${schema}" -s '
+    ($schema[0].items.properties.deferred_reason.enum) as $allowed
+    | all(.[]; . as $rec | ($allowed | index($rec.deferred_reason)) != null)' "${metricsFile}"
   assert_success
 }

@@ -37,4 +37,44 @@ function set-multiline-output {
     echo "${delimiter}"
   } >>"${GITHUB_OUTPUT:?set-multiline-output requires GITHUB_OUTPUT}"
 }
+# ---------------------------------------------------------------------------------------------
+# Shared jq definitions.
+#
+# One place for vocabulary that BOTH the warden and the monitor have to agree on. Prepend it to a
+# jq program and the definitions are in scope:
+#
+#     jq "${CW_JQ_LIB} [.[] | select(cw_is_due)] | length" metrics.json
+#
+# `cw_is_due` answers "would lego renew this certificate now?" for a metrics record, WITHOUT
+# asking lego. That distinction matters: the engine never predicts dueness -- ARI decides inside
+# lego and stays authoritative for what actually gets renewed. This is for REPORTING only: an
+# `action: deferred` record means "not evaluated this run", which conflates a certificate that is
+# genuinely waiting with one that is simply healthy and sorted last by the urgency walk. Counting
+# the healthy ones as backlog overstates a wave (a real run reported 38 deferred renewals of which
+# 16 were waiting and 22 were four months from needing anything).
+#
+# The threshold is not a guess at lego's rule -- it IS lego's rule, from cmd_run_renew.go
+# (getDueDate): with `--renew-days` unset the due date is `notAfter - lifetime/3`, and
+# `notAfter - lifetime/2` when the lifetime is 10 days or less. The record carries no lifetime, but
+# days_to_expiry / lifetime_fraction_remaining recovers it, which keeps this duration-independent
+# in the same way the monitor's thresholds are.
+#
+# Where it is approximate: ARI is primary, and its window is a span the CA chooses which lego
+# jitters within, so a certificate a hair either side of the point may disagree with lego by hours.
+# On a multi-day drain estimate that is noise, and it errs toward counting more as due.
+#
+# shellcheck disable=SC2016,SC2034 # a jq program, not bash: no expansion wanted, and bash never reads it
+CW_JQ_LIB='
+  def cw_is_due:
+    if (.lifetime_fraction_remaining // null) == null then false
+    elif .lifetime_fraction_remaining <= 0 then true
+    elif (.days_to_expiry // null) == null then false
+    else (.days_to_expiry / .lifetime_fraction_remaining) as $lifetimeDays
+      | .lifetime_fraction_remaining < (if $lifetimeDays > 10 then 1 / 3 else 1 / 2 end)
+    end;
+  def cw_deferred: .action == "deferred";
+  def cw_renewed: .action == "renewed" or .action == "forced";
+  def cw_holds_cert: (.lifetime_fraction_remaining // null) != null;
+'
+
 log-info "'$(basename "${BASH_SOURCE[0]}")' loaded."

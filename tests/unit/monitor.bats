@@ -289,3 +289,172 @@ healthy_record() {
   assert_success
   assert_output --partial "severity=OK"
 }
+
+# --- the renewal cap's `deferred` action ------------------------------------------------------
+# A capped warden run records the zones it left for the next run as `deferred`. Two properties
+# have to hold at once, and they pull in opposite directions: deferring must not raise an alert
+# by itself, and it must not SUPPRESS one either. The monitor gets that for free by being
+# action-blind for the SLO and keying on the lifetime fraction — these tests pin that down, since
+# a well-meaning "treat deferred as healthy" special case would break the second property.
+
+deferred_record() {
+  local zone="$1" frac="$2" days="$3"
+  jq -n -c --arg z "${zone}" --argjson f "${frac}" --argjson d "${days}" \
+    '{zone:$z, action:"deferred", kv_cert_name:("le-cert-production-" + $z + "-pfx"),
+      lifetime_fraction_remaining:$f, days_to_expiry:$d, error:""}'
+}
+
+@test "deferred zones are not a finding: a healthy capped run stays OK and silent" {
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"renewed.example.test","action":"renewed","kv_cert_name":"le-cert-production-renewed-pfx","lifetime_fraction_remaining":0.99,"days_to_expiry":89,"error":""}' \
+    "$(deferred_record "d1.example.test" 0.34 31)" \
+    "$(deferred_record "d2.example.test" 0.40 36)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=OK"
+  assert_output --partial "no notification sent"
+}
+
+@test "deferred zones count as managed, not as failures" {
+  # `deferred` carries an empty error and is not `not_delegated`, so it must land in the managed
+  # count and nowhere near the failed count — otherwise a capped run would page on every pass.
+  write_metrics_fixture "${METRICS}" \
+    "$(deferred_record "d1.example.test" 0.50 45)" \
+    "$(deferred_record "d2.example.test" 0.60 54)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "managed=2 failed=0"
+  assert_output --partial "severity=OK"
+}
+
+@test "a deferred zone whose lifetime has sunk still alerts (the cap must not blind the SLO)" {
+  # THE property that makes the cap safe to ship: the warden fills deferred records with the Key
+  # Vault validity window precisely so a backlog that stops draining is still visible here. If a
+  # deferred record ever reported a null fraction, this alert would go quiet exactly when the
+  # capped fleet was in trouble — a cap would look like a success while hiding one.
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"fresh.example.test","action":"renewed","kv_cert_name":"le-cert-production-fresh-pfx","lifetime_fraction_remaining":0.99,"days_to_expiry":89,"error":""}' \
+    "$(deferred_record "stuck.example.test" 0.12 11)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=CRITICAL"
+  assert_output --partial "stuck.example.test"
+}
+
+@test "an entirely deferred run is still measured, not treated as 'nothing evaluated'" {
+  # A run that spent its whole budget before the first zone it could act on (or one whose wave is
+  # bigger than the cap) records only deferred zones. That is a measurement, so the managed=0
+  # Layer C warning must NOT fire.
+  write_metrics_fixture "${METRICS}" \
+    "$(deferred_record "d1.example.test" 0.32 29)" \
+    "$(deferred_record "d2.example.test" 0.33 30)"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=OK"
+  refute_output --partial "no managed-cert metrics found"
+}
+
+# --- drain visibility -------------------------------------------------------------------------
+# min_lifetime_fraction decays with the calendar (~0.005/day on a 90-day certificate), so during a
+# multi-day paced drain it barely moves while the backlog actually shrinks. Without the moving
+# numbers, every card in that window looks identical — the pattern that teaches people to mute a
+# channel, which then costs the alert that matters.
+
+drain_fixture() { # <still-due> <renewed> [deferred_reason]
+  local due="${1}" renewed="${2}" reason="${3:-budget-spent}" i out=()
+  for ((i = 1; i <= due; i++)); do
+    out+=("$(jq -n -c --arg z "due${i}.example.test" --arg r "${reason}" \
+      '{zone:$z, kv_cert_name:("le-cert-production-" + $z), action:"deferred",
+        lifetime_fraction_remaining:0.2956, days_to_expiry:26, error:"", deferred_reason:$r}')")
+  done
+  for ((i = 1; i <= renewed; i++)); do
+    out+=("$(jq -n -c --arg z "done${i}.example.test" \
+      '{zone:$z, kv_cert_name:("le-cert-production-" + $z), action:"renewed",
+        lifetime_fraction_remaining:0.99, days_to_expiry:89, error:"", deferred_reason:""}')")
+  done
+  write_metrics_fixture "${METRICS}" "${out[@]}"
+}
+
+@test "a breaching drain that is progressing says so, in the reason line" {
+  drain_fixture 16 3
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "severity=WARNING" # the breach is real and stays real
+  assert_output --partial "16 still due, 3 renewed this run; draining"
+  assert_output --partial "still_due=16"
+  assert_output --partial "renewed=3"
+}
+
+@test "a breaching drain that has stopped says THAT, without inventing a new alert" {
+  drain_fixture 16 0
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "16 still due and NOTHING renewed this run; not draining"
+  # Severity comes from the lifetime SLO alone. cw_is_due is a proxy for lego's decision and
+  # disagrees with it by hours at the boundary — where a fleet issued together all sits at once —
+  # so it must never raise an alert on its own account.
+  assert_output --partial "severity=WARNING"
+}
+
+@test "a run told to renew nothing is not reported as a stalled drain" {
+  # max-renewals-per-run: none. Renewing nothing is the instruction, not a symptom, and a caller
+  # keeping renewals off an ad-hoc trigger gets one of these on every deploy.
+  drain_fixture 16 0 "budget-none"
+  run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "renewals suppressed on this run by design"
+  refute_output --partial "not draining"
+  assert_output --partial "renewals_suppressed=true"
+}
+
+@test "the card and the step summary carry the moving numbers" {
+  drain_fixture 16 3
+  run bash "${MONITOR_SH}"
+  assert_success
+  # Step summary rows an operator reads next to the card.
+  run grep -c '| Renewed this run | 3 |' "${GITHUB_STEP_SUMMARY}"
+  assert_output "1"
+  run grep -c '| Still due | 16 |' "${GITHUB_STEP_SUMMARY}"
+  assert_output "1"
+}
+
+@test "the Adaptive Card FactSet carries renewed and still-due" {
+  drain_fixture 16 3
+  # DRY_RUN prints the exact payload that would be POSTed; take the JSON off the end of it.
+  bash "${MONITOR_SH}" >"${BATS_TEST_TMPDIR}/out.txt" 2>&1
+  sed -n '/^{/,$p' "${BATS_TEST_TMPDIR}/out.txt" >"${BATS_TEST_TMPDIR}/payload.json"
+
+  run jq -e '[.message.body[] | select(.type == "FactSet") | .facts[] | .title] as $t
+    | ($t | index("Renewed this run")) != null and ($t | index("Still due")) != null' \
+    "${BATS_TEST_TMPDIR}/payload.json"
+  assert_success
+
+  # ... with the right values, in the order an operator reads them.
+  run jq -r '.message.body[] | select(.type == "FactSet") | .facts[]
+    | select(.title == "Renewed this run" or .title == "Still due")
+    | "\(.title)=\(.value)"' "${BATS_TEST_TMPDIR}/payload.json"
+  assert_output "Renewed this run=3
+Still due=16"
+
+  # And the reason TextBlock — the part a reader sees first — carries the drain clause.
+  run jq -r '.message.body[1].text' "${BATS_TEST_TMPDIR}/payload.json"
+  assert_output --partial "16 still due, 3 renewed this run; draining"
+}
+
+@test "onboarding zones waiting on a first certificate appear only when there are some" {
+  # A deferred zone with no certificate is not renewal backlog; it gets its own fact, and only
+  # when it has something to say, so an ordinary card stays short.
+  drain_fixture 2 1
+  run bash "${MONITOR_SH}"
+  refute_output --partial "Awaiting first issuance"
+
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"a.example.test","kv_cert_name":"le-cert-production-a-pfx","action":"deferred","lifetime_fraction_remaining":null,"days_to_expiry":null,"error":"","deferred_reason":"budget-spent"}' \
+    '{"zone":"b.example.test","kv_cert_name":"le-cert-production-b-pfx","action":"renewed","lifetime_fraction_remaining":0.99,"days_to_expiry":89,"error":"","deferred_reason":""}'
+  FORCE_NOTIFY=true run bash "${MONITOR_SH}"
+  assert_success
+  assert_output --partial "awaiting_issuance=1"
+  assert_output --partial "Awaiting first issuance"
+  # ... and it is NOT counted as a renewal backlog.
+  assert_output --partial "still_due=0"
+}

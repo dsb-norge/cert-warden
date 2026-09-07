@@ -6,7 +6,7 @@
 #
 # State (CW_AZ_STATE_DIR, required):
 #   secrets/<name>            raw secret values
-#   certs/<name>.json         {"name","sans":[...],"expires","cn"} — written by `certificate import`
+#   certs/<name>.json         {"name","sans":[...],"notBefore","expires","cn"} — written by `certificate import`
 #   fixtures/zones.json       output shape of: az network dns zone list -o json
 #   fixtures/recordsets-<zone>.json   output shape of: az network dns record-set list -o json
 #   calls.log                 every invocation, appended
@@ -122,9 +122,14 @@ case "${cmd[*]}" in
     ;;
 
   "keyvault certificate list")
-    # --query "[].{name:name, exp:attributes.expires}" -o json
+    # Two callers, two --query projections:
+    #   sweeper: [].{name:name, exp:attributes.expires}
+    #   warden:  [].{name:name, nbf:attributes.notBefore, exp:attributes.expires}
+    # The shim answers the union — extra keys are ignored by the sweeper's jq, and real az would
+    # simply not emit them. Real Key Vault renders both as UTC ISO-8601 with a +00:00 offset,
+    # which is what makes the warden's lexicographic sort chronological; keep that shape.
     if compgen -G "${state}/certs/*.json" >/dev/null; then
-      jq -s 'map({name: .name, exp: .expires})' "${state}"/certs/*.json
+      jq -s 'map({name: .name, nbf: .notBefore, exp: .expires})' "${state}"/certs/*.json
     else
       echo "[]"
     fi
@@ -166,10 +171,11 @@ case "${cmd[*]}" in
     sans=$(openssl x509 -in "${workdir}/leaf.pem" -noout -ext subjectAltName 2>/dev/null |
       grep -oE 'DNS:[^,[:space:]]+' | sed 's/^DNS://' | jq -R . | jq -s .)
     expires=$(date -u -d "$(openssl x509 -in "${workdir}/leaf.pem" -noout -enddate | cut -d= -f2)" +"%Y-%m-%dT%H:%M:%S+00:00")
+    notBefore=$(date -u -d "$(openssl x509 -in "${workdir}/leaf.pem" -noout -startdate | cut -d= -f2)" +"%Y-%m-%dT%H:%M:%S+00:00")
     cn=$(openssl x509 -in "${workdir}/leaf.pem" -noout -subject -nameopt multiline | awk -F' = ' '/commonName/ {print $2}')
 
-    jq -n --arg n "${name:?}" --argjson sans "${sans}" --arg exp "${expires}" --arg cn "${cn:-}" \
-      '{name: $n, sans: $sans, expires: $exp, cn: $cn}' >"${state}/certs/${name}.json"
+    jq -n --arg n "${name:?}" --argjson sans "${sans}" --arg nbf "${notBefore}" --arg exp "${expires}" --arg cn "${cn:-}" \
+      '{name: $n, sans: $sans, notBefore: $nbf, expires: $exp, cn: $cn}' >"${state}/certs/${name}.json"
 
     # Real Key Vault strips the import password: the cert's backing secret returns a
     # PASSWORD-LESS PKCS#12 (the scripts extract it with `-passin pass:`). Mirror that:

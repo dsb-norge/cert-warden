@@ -9,8 +9,8 @@
     },
     {
       "repo": "bats-core/bats-assert",
-      "tag": "v2.1.0",
-      "commit": "78fa631d1370562d2cd4a1390989e706158e7bf0",
+      "tag": "v2.2.4",
+      "commit": "f1e9280eaae8f86cbe278a687e6ba755bc802c1a",
       "why": "same as bats-support"
     }
   ],

@@ -26,13 +26,13 @@ on:
 # custom regex manager in renovate.json (see the `# renovate:` annotations).
 env:
   # renovate: datasource=go depName=mvdan.cc/sh/v3
-  SHFMT_VERSION: "v3.13.1"
+  SHFMT_VERSION: "v3.14.1"
   # renovate: datasource=go depName=github.com/rhysd/actionlint
   ACTIONLINT_VERSION: "v1.7.12"
   # renovate: datasource=pypi depName=yamllint
   YAMLLINT_VERSION: "1.38.0"
   # renovate: datasource=pypi depName=zizmor
-  ZIZMOR_VERSION: "1.29.0"
+  ZIZMOR_VERSION: "1.30.0"
   # renovate: datasource=go depName=github.com/suzuki-shunsuke/pinact/v4
   PINACT_VERSION: "v4.1.1"
   # Tag@commit pair: the commit sha is what installs (scripts/ci/install-bats.sh verifies it
@@ -160,7 +160,7 @@ jobs:
 
       - name: Upload SARIF
         if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
         with:
           sarif_file: zizmor.sarif
           category: zizmor

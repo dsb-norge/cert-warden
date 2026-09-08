@@ -45,10 +45,8 @@ refute_regex() {
 	local -r value="${1}"
 	local -r pattern="${2}"
 
-	if [[ '' =~ ${pattern} ]] || (( ${?} == 2 )); then
-		echo "Invalid extended regular expression: \`${pattern}'" \
-		| batslib_decorate 'ERROR: refute_regex' \
-		| fail
+	if ! __check_is_valid_regex "${pattern}" "${FUNCNAME[0]}"; then
+		return 1
 	elif [[ "${value}" =~ ${pattern} ]]; then
 		if shopt -p nocasematch &>/dev/null; then
 			local case_sensitive=insensitive

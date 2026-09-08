@@ -18,7 +18,16 @@ scoped, justified suppression — never a disabled job.
   - `artipacked` for `pr-preview.yml`/`release-please.yml` (they push tags — that's their job);
   - `unpinned-uses` policy: internal `dsb-norge/cert-warden/*` refs are **tag**-pinned by
     design (release-please + preview rewriting own them); everything else must be SHA-pinned;
-  - `github-env` for `action.yml` (setup-lego appends a runner-temp dir to `GITHUB_PATH`).
+  - `github-env` for `action.yml` (setup-lego appends a runner-temp dir to `GITHUB_PATH`);
+  - `self-repository` for `ci.yml` — **toolchain conflict, not a design choice.** zizmor 1.30.0
+    added this audit; it wants GitHub's `$/…` self-repository form instead of workspace-relative
+    `./…`, and it is right that `$/` is a form of pinning that cannot be tricked into running an
+    action an earlier step cloned into the workspace. But actionlint's current release (v1.7.12,
+    2026-03-30) predates the July-2026 syntax and rejects every `$/` use as "invalid format
+    because ref is missing", so taking zizmor's auto-fix only moves the red job. All 10 sites are
+    ci.yml L3 self-test steps; no composite action or reusable workflow uses `./`, so nothing a
+    consumer executes is affected. **Drop this suppression as soon as actionlint parses `$/`** —
+    it is the one suppression here with an expiry condition rather than a design justification.
 - **Escalation**: a finding you can neither fix nor confidently justify → treat as a blocker,
   not a nuisance; raise it with the maintainer group.
 

@@ -51,6 +51,15 @@ canary, not by pinning ([testing.md](testing.md) P-21).
 
 - **`github/codeql-action`** publishes `codeql-bundle-*` as its newest release. The tag you
   want is the `v4.x` action tag — `gh api repos/github/codeql-action/tags`.
+- **`golang.org/x/vuln`** (govulncheck) answers `releases/latest` with a *stale* tag — it
+  reported v1.1.4 while v1.7.0 was current. The Go mirror repos do not keep GitHub Releases in
+  step with their tags. Use `gh api repos/golang/vuln/tags` or the module proxy
+  (`curl -s https://proxy.golang.org/golang.org/x/vuln/@v/list | sort -V | tail`), which is
+  authoritative for anything installed with `go install`.
+- **Vendored libraries have no "latest" check at all.** The mutable-anchor watchdog detects a
+  *moved* tag, never a *newer* one, so `tests/vendor/` can silently fall behind for years —
+  bats-assert did exactly that. Check those upstreams by hand during a sweep
+  ([tests/vendor/README.md](../tests/vendor/README.md)).
 
 That is why step 3 uses pinact rather than a shell loop: pinact resolves the correct action
 tag.
@@ -122,12 +131,28 @@ bats tests/integration        # docker + lego on PATH; see testing.md §7
 What each bumped tool can newly break:
 
 - **shfmt** — minor releases change formatting rules; `shfmt -d .` must come back empty, and
-  if it doesn't, the reformat belongs in the same commit.
+  if it doesn't, the reformat belongs in the same commit. Since v3.14 it also requires
+  Go >= 1.26, which is newer than the hosted runner ships; `go install` handles that by itself
+  through the toolchain auto-switch, so there is nothing to pin, but a cache-miss install now
+  downloads a toolchain first.
 - **zizmor** — new releases ship new audits. A new finding is a real signal: fix it, or add a
   scoped suppression *with a justification* to `zizmor.yml`
   (see [security-tooling.md](security-tooling.md)).
 - **actionlint / yamllint** — new rules, same deal.
-- **bats / bashcov** — run both suites, not just the unit one.
+- **bats / bashcov** — run both suites, not just the unit one. **bashcov 4.x is not a
+  drop-in**: it requires `simplecov ~> 1.1`, and SimpleCov 1.x rewrote the reporting path in
+  three ways that each independently break the coverage step in `ci.yml`. It prints the
+  summary to **stderr** (`$stderr.puts` in `SimpleCov::Formatter::Base#emit_status`), so the
+  existing `| tee` — which captures stdout only — never sees it; it renamed the label to
+  `Line coverage:` (lower-case `c`); and it reordered the line to
+  `Line coverage: 12 / 14 (85.71%)`, so a grep for digits after the colon captures the covered
+  *count*, not the percentage. The failure mode is silent and the worst of the three is the
+  last: the step is advisory, so CI stays green while reporting a plausible wrong number.
+  Bumping bashcov past 3.x therefore means reworking the capture and parse — treat it as its
+  own PR, not a line in a sweep. The known-good figure to reproduce is **87.1% (851 / 977)**,
+  emitted by bashcov 3.3.0 / simplecov 0.21 as `Line Coverage: 87.1% (851 / 977)` on stdout
+  (CI, 2026-09-08). If the reworked step cannot reproduce that number, the parse is wrong —
+  and note that `${pct:-unknown}` means a broken parse still exits green.
 - **harness images** — `docker compose -f tests/harness/docker-compose.pebble.yml pull` then
   the L2 suite; a CoreDNS or Pebble major can reject the existing config.
 - **lego** — see §5. The L2 suite is mandatory, not optional.
@@ -146,6 +171,11 @@ scripts/ci/verify-dist.sh actions/create-github-app-token <new-sha>   # review: 
 
 azure/login is review-mode because its tags are known to ship *cosmetically* stale bundles
 (at v3.0.1: a stale user-agent marker + CRLF noise) — a hard gate would false-fail forever.
+At **v3.0.2 the rebuild came back byte-identical**: upstream added an approval-gated release
+pipeline and replaced the hard-coded marker with a runtime `GITHUB_ACTION_REF` read
+(Azure/login#614), which was the larger half of that diff. Left in review mode anyway — one
+clean release is not evidence the next one will be, and a premature gate false-fails a bump
+nobody can then land. Two or three consecutive clean rebuilds would justify promoting it.
 Anything in the printed diff beyond that pattern is a stop-and-investigate signal.
 create-github-app-token is review-mode until byte-reproducibility is established; it deserves
 the strictest reading of the three — it is the only action handling a persistent credential
@@ -183,9 +213,13 @@ release-please reads commit types, so this is not cosmetic:
 
 - **`chore(deps):`** — CI-internal only: linters, test tooling, harness images, and actions
   used solely by our own workflows. No release.
-- **`fix(deps):`** — anything that changes what a *consumer* receives. Today that means the
-  lego default in `actions/setup-lego` / `reusable-warden.yml`. Cuts a patch release, which
-  is what makes the new default reachable through a version tag.
+- **`fix(deps):`** — anything that changes what a *consumer* receives. Cuts a patch release,
+  which is what makes the change reachable through a version tag. Two things qualify, not one:
+  the lego default in `actions/setup-lego` / `reusable-warden.yml`, **and any third-party
+  action pinned inside the reusable workflows or the published composite actions** — today
+  `azure/login`, which executes in all three `reusable-*.yml`. A consumer calling
+  `reusable-warden.yml@v1` runs our pin, so bumping it changes what they execute. Only actions
+  that appear nowhere but `ci.yml` are CI-internal.
 
 A full sweep touches both kinds, so **split it into two commits** rather than picking one type
 for the lot. Where a single file holds both (e.g. `reusable-warden.yml` carries an

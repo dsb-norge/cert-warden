@@ -148,8 +148,24 @@ captured by bats' `run` (P-20) and registers **zero** source lines (`covered=0/0
 as a bogus 0.00%). bashcov traces via a dedicated `BASH_XTRACEFD`, so instrumentation is
 invisible to the tests: the full suite passes identically instrumented and not.
 
-Baseline for the record: the unit layer alone measured **43% of product lines**; the
-integration layer drives the warden's whole main flow on top of that.
+**Do not read the percentage at line resolution.** It is a trend signal and nothing finer.
+Across six CI runs during the coverage rework — four of them on a byte-identical tree — the
+aggregate ranged over 845-851 covered lines with no code change at all, because bash xtrace
+decides line relevance partly by what got parsed in a traced context. Two or three samples
+will happily look like a systematic shift and be noise. The coverage report is published as a
+CI artifact (`coverage-report`, 14-day retention): compare **per file** from that, which is
+deterministic, rather than re-running CI against a moving total.
+
+**A summary the step cannot parse fails the job.** The coverage number is advisory; the
+ability to measure it is not. bashcov 4.x moved the summary to stderr, lower-cased the label
+and reordered the line — all silently — so the step now treats an unparseable summary as an
+error rather than printing `unknown` and exiting green.
+
+Baselines for the record, measured 2026-09-08 under bashcov 3.3.0: the unit layer alone covers
+**558 / 949 product lines (58.8%)**, with `cert-warden.sh` the thin spot at 39%; unit +
+integration reaches roughly **87%**, so L2 is carrying most of the warden's coverage. Note that
+this cannot be reproduced locally in a container — bashcov's tracing does not follow the warden
+subprocess, so a containerised full run silently reports the unit-only figure.
 
 ## 7. Running locally
 

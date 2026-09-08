@@ -951,7 +951,7 @@ function renewExistingCertificate() {
   #   --renew-force        : only when an operator forces it (CERT_FORCE_RENEWAL); bypasses ARI.
   #
   # The ARI-unavailable fallback is PROPORTIONAL, and we deliberately leave it alone. Verified
-  # against lego v5.3.1 (cmd/cmd_run_renew.go, getFlagRenewDays + getDueDate): the renewal
+  # against lego v5.4.1 (cmd/cmd_run_renew.go, getFlagRenewDays + getDueDate): the renewal
   # decision consults `--renew-days` only when ARI returned no renewal time, and when the flag is
   # UNSET lego computes the due date as
   #

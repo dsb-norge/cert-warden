@@ -18,3 +18,17 @@ rules:
     # pushes the floating major tag. It runs no untrusted code.
     ignore:
       - release-please.yml
+  self-repository:
+    # zizmor 1.30.0 added this audit: it prefers GitHub's `$/…` self-repository form over the
+    # workspace-relative `./…` for in-repo actions. The reasoning is sound — `$/` is a form of
+    # pinning and cannot be tricked into running an action that an earlier step cloned into the
+    # workspace — but the toolchain has not caught up. actionlint (v1.7.12, released 2026-03-30)
+    # predates the July-2026 syntax and rejects every `$/` use: "invalid format because ref is
+    # missing". Taking zizmor's auto-fix therefore just trades a red zizmor job for a red
+    # actionlint job; verified by applying the fix and running both.
+    # Scope is our own CI: all ten uses are ci.yml self-test steps (L3 same-commit dogfooding).
+    # No composite action or reusable workflow uses `./`, so nothing a consumer executes changes.
+    # Revisit when actionlint ships a release that parses `$/` — then drop this block and take
+    # the auto-fix.
+    ignore:
+      - ci.yml

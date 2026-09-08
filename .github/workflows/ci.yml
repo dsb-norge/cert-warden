@@ -41,7 +41,7 @@ env:
   # renovate: datasource=github-tags depName=bats-core/bats-core
   BATS_CORE_REF: "v1.14.0@eb7f42f8d608ac693d7a4b67474f6714ea68cfc5"
   # renovate: datasource=rubygems depName=bashcov
-  BASHCOV_VERSION: "3.3.0"
+  BASHCOV_VERSION: "4.0.0"
   # renovate: datasource=go depName=golang.org/x/vuln
   GOVULNCHECK_VERSION: "v1.7.0"
 
@@ -466,21 +466,46 @@ jobs:
         run: docker compose -f tests/harness/docker-compose.pebble.yml pull --quiet
 
       - name: Run unit + integration suites (instrumented)
+        # 2>&1 is load-bearing: simplecov 1.x (bashcov 4.x) prints the coverage summary to
+        # STDERR, where 0.x printed it to stdout. Without the redirect the summary never
+        # reaches the log and the parse below finds nothing. pipefail (defaults.run.shell:
+        # bash) still propagates a bats failure through the tee.
         run: |
-          bashcov --root "${PWD}" -- bats --print-output-on-failure tests/unit tests/integration |
+          bashcov --root "${PWD}" -- bats --print-output-on-failure tests/unit tests/integration 2>&1 |
             tee /tmp/bats-coverage.log
 
       - name: Report coverage (warn-only threshold)
         run: |
           # .simplecov filters the measurement to actions/ + lib/ (product code only).
           threshold=60 # advisory; target >= 80 as scenarios grow
-          pct=$(grep -oE 'Line Coverage: [0-9.]+' /tmp/bats-coverage.log | grep -oE '[0-9.]+' || true)
+
+          # Version-agnostic parse -- the summary line differs between simplecov generations:
+          #   0.x   Line Coverage: 87.09% (850 / 976)
+          #   1.x   Line coverage: 850 / 976 (87.09%)
+          # Matching the label case-insensitively and pulling the single NN.NN% token reads both,
+          # so the next bump does not turn into another flag day.
+          line=$(grep -iE '^line coverage:' /tmp/bats-coverage.log | tail -1) || line=""
+          pct=$(printf '%s\n' "${line}" | grep -oE '[0-9]+(\.[0-9]+)?%' | tr -d '%') || pct=""
+
+          # The coverage NUMBER is advisory. Being able to MEASURE it is not. A silent parse
+          # failure is how this step would have spent an entire bump printing "unknown" while
+          # exiting green, so an unparseable summary is a hard failure with the evidence
+          # attached -- one line to fix when upstream changes the format, versus a metric that
+          # quietly stops meaning anything.
+          if [[ -z "${pct}" ]]; then
+            echo "::error::could not parse a coverage percentage from the bashcov summary."
+            echo "matched line: ${line:-<nothing matched /^line coverage:/i>}"
+            echo "--- tail of the coverage log ---"
+            tail -20 /tmp/bats-coverage.log
+            exit 1
+          fi
+
           {
             echo "### Coverage (bashcov over unit + integration, advisory)"
-            echo "bash line coverage of actions/ + lib/: **${pct:-unknown}%** (advisory threshold: ${threshold}%)"
+            echo "bash line coverage of actions/ + lib/: **${pct}%** (advisory threshold: ${threshold}%)"
           } >>"${GITHUB_STEP_SUMMARY}"
-          echo "coverage: ${pct:-unknown}% (threshold ${threshold}%, advisory)"
-          if [[ -n "${pct}" ]] && awk "BEGIN { exit !(${pct} < ${threshold}) }"; then
+          echo "coverage: ${pct}% (threshold ${threshold}%, advisory)"
+          if awk "BEGIN { exit !(${pct} < ${threshold}) }"; then
             echo "::warning::bash coverage ${pct}% is below the advisory threshold of ${threshold}%."
           fi
 

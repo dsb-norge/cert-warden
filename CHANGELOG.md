@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.1](https://github.com/dsb-norge/cert-warden/compare/v1.1.0...v1.1.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* **deps:** bump azure/login to v3.0.2 ([d0f1b43](https://github.com/dsb-norge/cert-warden/commit/d0f1b436ccfc210fb0efc02b84429d360acb88ad))
+* **deps:** bump lego to v5.4.1 ([47691b3](https://github.com/dsb-norge/cert-warden/commit/47691b3f065bd74545a215dd42f493f4cfed2abe))
+
 ## [1.1.0](https://github.com/dsb-norge/cert-warden/compare/v1.0.4...v1.1.0) (2026-09-07)
 
 

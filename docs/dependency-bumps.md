@@ -139,20 +139,29 @@ What each bumped tool can newly break:
   scoped suppression *with a justification* to `zizmor.yml`
   (see [security-tooling.md](security-tooling.md)).
 - **actionlint / yamllint** — new rules, same deal.
-- **bats / bashcov** — run both suites, not just the unit one. **bashcov 4.x is not a
-  drop-in**: it requires `simplecov ~> 1.1`, and SimpleCov 1.x rewrote the reporting path in
-  three ways that each independently break the coverage step in `ci.yml`. It prints the
-  summary to **stderr** (`$stderr.puts` in `SimpleCov::Formatter::Base#emit_status`), so the
-  existing `| tee` — which captures stdout only — never sees it; it renamed the label to
-  `Line coverage:` (lower-case `c`); and it reordered the line to
-  `Line coverage: 12 / 14 (85.71%)`, so a grep for digits after the colon captures the covered
-  *count*, not the percentage. The failure mode is silent and the worst of the three is the
-  last: the step is advisory, so CI stays green while reporting a plausible wrong number.
-  Bumping bashcov past 3.x therefore means reworking the capture and parse — treat it as its
-  own PR, not a line in a sweep. The known-good figure to reproduce is **87.1% (851 / 977)**,
-  emitted by bashcov 3.3.0 / simplecov 0.21 as `Line Coverage: 87.1% (851 / 977)` on stdout
-  (CI, 2026-09-08). If the reworked step cannot reproduce that number, the parse is wrong —
-  and note that `${pct:-unknown}` means a broken parse still exits green.
+- **bats / bashcov** — run both suites, not just the unit one. The bashcov 3.x -> 4.x bump is
+  done (2026-09-08); what it taught is worth keeping, because the same shape will recur. 4.x
+  requires `simplecov ~> 1.1`, and simplecov 1.x changed the summary in three ways that each
+  independently broke the capture: it moved to **stderr** (`| tee` pipes stdout only), the
+  label lost its capital C, and the line reordered from `Line Coverage: 58.8% (558 / 949)` to
+  `Line coverage: 553 / 951 (58.14%)` — so a digits-after-the-colon grep returned the covered
+  *count*, not the percentage. Every one of those fails silently. The step now redirects `2>&1`
+  and parses the label case-insensitively plus the single `NN.NN%` token, which reads both
+  generations, and **an unparseable summary is a hard failure** rather than the string
+  `unknown`. Keep it that way: the coverage number is advisory, the ability to measure it is
+  not.
+- **Do not compare the coverage percentage at line resolution.** It is not stable enough to
+  answer "did my change move the measurement?". Across six CI runs during the #36 work — four
+  of them on a byte-identical tree — the aggregate ranged over 845-851 covered lines on its
+  own, because bash xtrace decides line relevance partly by what got parsed in a traced
+  context. Two or three samples will happily look systematic and be noise. The
+  coverage report is published as a CI artifact: download it and compare **per file**, which is
+  deterministic, instead of re-running CI and squinting at a moving total.
+- **Coverage cannot be reproduced locally in a container.** bashcov's tracing does not follow
+  the warden subprocess, so the L2-driven lines only ever appear on a CI runner — a
+  containerised full run reports the unit-only figure and passes, which looks like a real
+  result and is not. Unit-only coverage does work in a `ruby:3.3` container (mount the host
+  docker binaries for the harness).
 - **harness images** — `docker compose -f tests/harness/docker-compose.pebble.yml pull` then
   the L2 suite; a CoreDNS or Pebble major can reject the existing config.
 - **lego** — see §5. The L2 suite is mandatory, not optional.

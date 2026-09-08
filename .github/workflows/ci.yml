@@ -484,6 +484,20 @@ jobs:
             echo "::warning::bash coverage ${pct}% is below the advisory threshold of ${threshold}%."
           fi
 
+      - name: Publish the coverage report
+        # The aggregate percentage is too noisy to answer "did this change the measurement?" --
+        # observed spread is ~5 covered lines across runs of a byte-identical tree. Per-file data
+        # settles such questions in one look; without it the only recourse is re-running CI and
+        # squinting at a number that moves on its own. Uploaded on failure too: a red L2 run is
+        # exactly when you want to see which paths were reached.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
+          if-no-files-found: warn
+
   action-smokes:
     name: "action smokes (L3: uses ./)"
     # Composite actions exercised same-commit as a consumer step would, with asserted outputs.

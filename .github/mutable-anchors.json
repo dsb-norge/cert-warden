@@ -17,8 +17,8 @@
   "rubygems": [
     {
       "gem": "bashcov",
-      "version": "3.3.0",
-      "sha256": "9a761b6e36598f74897ead922cc04f85de3d1362f54a595c8eb6fcf5cb139c31",
+      "version": "4.0.0",
+      "sha256": "de056ab2513fe960d2eba7f3963d36cafa0479b88f4d56ca238048176690e5ba",
       "why": "installed in CI without a lockfile; rubygems versions are immutable by policy — this verifies the policy holds for the exact artifact we execute. The version here must match BASHCOV_VERSION in ci.yml; the check fails loudly when a bump forgets this file."
     }
   ]

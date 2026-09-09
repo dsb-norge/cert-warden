@@ -59,7 +59,8 @@ Outputs include the drain pair — `renewed-count` and `still-due-count` — alo
 
 `METRICS_FILE`, `ENV_NAME`, `WARN_THRESHOLD` (0.30), `PAGE_THRESHOLD` (0.15),
 `LIVENESS_WINDOW_HOURS` (36), `CERT_WARDEN_CONCLUSION`, `CERT_WARDEN_RUN_URL`,
-`METRICS_AGE_HOURS`, `RESOLVE_FAILED` (`false`), `BOT_API_BASE`, `BOT_API_AUDIENCE`,
+`METRICS_AGE_HOURS` (liveness check, and dates the run on the card/summary),
+`RESOLVE_FAILED` (`false`), `BOT_API_BASE`, `BOT_API_AUDIENCE`,
 `BOT_ALIAS`, `FORCE_NOTIFY`, `DRY_RUN`. All optional; without the bot triple the monitor is
 evaluate-only. Exit code is always 0 on a completed evaluation.
 

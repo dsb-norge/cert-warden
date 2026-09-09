@@ -45,7 +45,8 @@
 #    PAGE_THRESHOLD           min_lifetime_fraction page level (default 0.15)
 #    CERT_WARDEN_CONCLUSION   Triggering Cert Warden run conclusion (success/failure/"")
 #    CERT_WARDEN_RUN_URL      Link to the triggering run (optional)
-#    METRICS_AGE_HOURS        Age of the metrics (hours) for the liveness check (optional)
+#    METRICS_AGE_HOURS        Age of the metrics (hours) — liveness check, and dates the
+#                             warden run on the card/summary so "Renewed" cannot read as "now"
 #    RESOLVE_FAILED           "true" when the caller could not resolve the warden run at all
 #                             (GitHub API unreachable) => severity UNKNOWN, never notifies
 #    LIVENESS_WINDOW_HOURS    Max tolerated metrics age before alerting (default 36)
@@ -238,6 +239,30 @@ fi
 echo "${_action_name}: severity=${severity}"
 # endregion -------------------------------------------------------------------------------------
 
+# region: run age -------------------------------------------------------------------------------
+# WHICH warden run is this card about? METRICS_AGE_HOURS has been an input all along but fed only
+# the liveness check, so a card announced renewals without ever dating them. That is not cosmetic:
+# the two monitor triggers differ precisely here. `workflow_run` fires straight after a warden run,
+# so "renewed" really is current; `schedule` re-reports whatever the latest warden run was, however
+# old — and a daily monitor cron over a less-frequent warden therefore re-announces the same
+# renewals every day. Dating the run fact is what tells those two cards apart.
+#
+# Rendered, not raw: the age is integer-truncated hours, so the common workflow_run case is "0",
+# which would print as "(0h ago)" — noise on precisely the card whose wording was already honest.
+# Guarded on digits because a non-numeric value must degrade to "no claim about age" rather than
+# to a wrong one.
+runAge=""
+if [[ "${METRICS_AGE_HOURS}" =~ ^[0-9]+$ ]]; then
+  if ((METRICS_AGE_HOURS == 0)); then
+    runAge=" (just now)"
+  elif ((METRICS_AGE_HOURS < 48)); then
+    runAge=" (${METRICS_AGE_HOURS}h ago)"
+  else
+    runAge=" ($((METRICS_AGE_HOURS / 24))d ago)"
+  fi
+fi
+# endregion -------------------------------------------------------------------------------------
+
 # region: step summary --------------------------------------------------------------------------
 # UNKNOWN measured nothing, so the metric cells must say so: printing 0 / null there is the
 # same lie the notification path is being fixed to stop telling.
@@ -265,11 +290,11 @@ fi
   echo "| --- | --- |"
   echo "| Managed certs | ${dspManaged} |"
   echo "| Failed | ${dspFailed} |"
-  echo "| Renewed this run | ${dspRenewed} |"
+  echo "| Renewed | ${dspRenewed} |"
   echo "| Still due | ${dspStillDue} |"
   echo "| min_lifetime_fraction | ${dspMinLifetime} |"
   echo "| Worst zone | ${dspWorst} |"
-  echo "| Cert Warden run | ${CERT_WARDEN_CONCLUSION:-n/a} |"
+  echo "| Cert Warden run | ${CERT_WARDEN_CONCLUSION:-n/a}${runAge} |"
   if ((${#reasons[@]})); then
     echo ""
     echo "**Alert reasons:**"
@@ -350,10 +375,13 @@ case "${severity}" in
 esac
 
 reasonsText=$(printf '%s\n' "${reasons[@]:-no issues}" | sed 's/^/- /')
-# The FactSet carries the moving numbers as well as the SLO. `Renewed this run` and `Still due`
-# are the pair that answers "draining or stuck?" -- min_lifetime_fraction cannot, because it
-# decays with the calendar rather than with progress. The last two facts appear only when they
-# have something to say, so an ordinary card stays short.
+# The FactSet carries the moving numbers as well as the SLO. `Renewed` and `Still due` are the
+# pair that answers "draining or stuck?" -- min_lifetime_fraction cannot, because it decays with
+# the calendar rather than with progress. `Renewed` is deliberately NOT "renewed this run": a
+# scheduled monitor re-reports an older warden run, and a reader binds "this" to "now" and
+# concludes certificates were renewed minutes ago. The `Cert Warden run` fact carries the age
+# instead, so the count and its timestamp sit on the same card. The last two facts appear only
+# when they have something to say, so an ordinary card stays short.
 factsJson=$(jq -n \
   --arg env "${ENV_NAME}" \
   --arg managed "${managedCount}" \
@@ -363,13 +391,13 @@ factsJson=$(jq -n \
   --arg awaiting "${awaitingIssuanceCount}" \
   --arg minlf "${minLifetimeFraction}" \
   --arg worst "${worstZone:-n/a}${worstDays:+ (~${worstDays}d)}" \
-  --arg run "${CERT_WARDEN_CONCLUSION:-n/a}" \
+  --arg run "${CERT_WARDEN_CONCLUSION:-n/a}${runAge}" \
   --argjson suppressed "${renewalsSuppressed}" \
   '[
      {title: "Environment", value: $env},
      {title: "Managed certs", value: $managed},
      {title: "Failed", value: $failed},
-     {title: "Renewed this run", value: (if $suppressed then ($renewed + " (renewals suppressed)") else $renewed end)},
+     {title: "Renewed", value: (if $suppressed then ($renewed + " (renewals suppressed)") else $renewed end)},
      {title: "Still due", value: $stilldue},
      {title: "min_lifetime_fraction", value: $minlf},
      {title: "Worst zone", value: $worst},

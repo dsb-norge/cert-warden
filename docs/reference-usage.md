@@ -419,8 +419,17 @@ So the numbers that *move* are reported alongside it, in three places:
 | Where | What it says |
 |---|---|
 | Warden step summary | `renewed: 3` and `deferred: 38 — 16 renewal(s) still due, 22 not yet due, 0 awaiting first issuance` |
-| Monitor step summary + Teams card | `Renewed this run: 3`, `Still due: 16`, and `Awaiting first issuance` when there is any |
+| Monitor step summary + Teams card | `Renewed: 3`, `Still due: 16`, and `Awaiting first issuance` when there is any |
 | Monitor reason line | `… — 16 still due, 3 renewed this run; draining` |
+
+**The card says which run it is describing.** `Cert Warden run` carries the run's age next to its
+conclusion — `success (2h ago)`, or `(just now)` under an hour and `(3d ago)` past two days. This is
+not decoration: the monitor's two triggers differ exactly here. `workflow_run` fires straight after
+a warden run, so `Renewed: 4` really is current; `schedule` re-evaluates whatever the *latest*
+warden run was, however old, and without the age two such cards are byte-identical. A monitor cron
+that runs more often than the warden would otherwise re-announce the same renewals every day — and
+"renewed" reads as "just now" unless the card says otherwise. The fact is `Renewed`, not `Renewed
+this run`, for the same reason: a reader binds "this" to "now".
 
 That last clause is the one an operator reads first. It says `draining` when the run renewed
 something, `not draining` when it renewed nothing while certificates were due, and `renewals

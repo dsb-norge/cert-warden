@@ -180,5 +180,12 @@ bats tests/integration
 shellcheck ... && shfmt -d . && yamllint --strict . && actionlint && zizmor . && pinact run --check
 ```
 
+**A lego v4 on `PATH` fails ~13 of the 15 e2e tests with no hint that the version is why**: the
+warden passes flags v5 introduced, so lego answers with `flag provided but not defined: -path`
+buried under its full usage text, and the tests that never reach lego (e2e-5, e2e-14) still pass —
+which reads like a real regression rather than a missing prerequisite. Check `lego --version`
+before debugging an e2e wall; `go install github.com/go-acme/lego/v5/cmd/lego@<pin>` (the `v5` in
+the module path is what selects the major) is the fix.
+
 Bumping any of those tools: run this same set **at the new versions** first — see
 [dependency-bumps.md](dependency-bumps.md) §4.

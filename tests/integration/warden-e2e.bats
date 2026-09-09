@@ -562,11 +562,11 @@ JSON
 
   # The card the bot actually received carries the drain facts...
   run jq -r '[.body.message.body[] | select(.type == "FactSet") | .facts[] | .title] | join(",")' "${sinklog}"
-  assert_output --partial "Renewed this run"
+  assert_output --partial "Renewed"
   assert_output --partial "Still due"
 
   # ... and reports the suppression rather than calling a deliberate no-op a stalled drain.
   run jq -r '.body.message.body[] | select(.type == "FactSet") | .facts[]
-    | select(.title == "Renewed this run") | .value' "${sinklog}"
+    | select(.title == "Renewed") | .value' "${sinklog}"
   assert_output --partial "renewals suppressed"
 }

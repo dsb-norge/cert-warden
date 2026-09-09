@@ -412,7 +412,7 @@ drain_fixture() { # <still-due> <renewed> [deferred_reason]
   run bash "${MONITOR_SH}"
   assert_success
   # Step summary rows an operator reads next to the card.
-  run grep -c '| Renewed this run | 3 |' "${GITHUB_STEP_SUMMARY}"
+  run grep -c '| Renewed | 3 |' "${GITHUB_STEP_SUMMARY}"
   assert_output "1"
   run grep -c '| Still due | 16 |' "${GITHUB_STEP_SUMMARY}"
   assert_output "1"
@@ -425,20 +425,67 @@ drain_fixture() { # <still-due> <renewed> [deferred_reason]
   sed -n '/^{/,$p' "${BATS_TEST_TMPDIR}/out.txt" >"${BATS_TEST_TMPDIR}/payload.json"
 
   run jq -e '[.message.body[] | select(.type == "FactSet") | .facts[] | .title] as $t
-    | ($t | index("Renewed this run")) != null and ($t | index("Still due")) != null' \
+    | ($t | index("Renewed")) != null and ($t | index("Still due")) != null' \
     "${BATS_TEST_TMPDIR}/payload.json"
   assert_success
 
   # ... with the right values, in the order an operator reads them.
   run jq -r '.message.body[] | select(.type == "FactSet") | .facts[]
-    | select(.title == "Renewed this run" or .title == "Still due")
+    | select(.title == "Renewed" or .title == "Still due")
     | "\(.title)=\(.value)"' "${BATS_TEST_TMPDIR}/payload.json"
-  assert_output "Renewed this run=3
+  assert_output "Renewed=3
 Still due=16"
 
   # And the reason TextBlock — the part a reader sees first — carries the drain clause.
   run jq -r '.message.body[1].text' "${BATS_TEST_TMPDIR}/payload.json"
   assert_output --partial "16 still due, 3 renewed this run; draining"
+}
+
+run_fact_for_age() { # <age-hours> -> the `Cert Warden run` fact value the card would carry
+  # </dev/null: the script must not eat the caller's stdin when driven in a loop.
+  METRICS_AGE_HOURS="${1}" bash "${MONITOR_SH}" >"${BATS_TEST_TMPDIR}/out.txt" 2>&1 </dev/null
+  sed -n '/^{/,$p' "${BATS_TEST_TMPDIR}/out.txt" |
+    jq -r '.message.body[] | select(.type == "FactSet") | .facts[]
+           | select(.title == "Cert Warden run") | .value'
+}
+
+@test "the card dates the warden run it describes" {
+  # Field report (consumer running v1.1.0): two consecutive cards described the SAME warden
+  # run byte-identically -- one posted by workflow_run right after it, one by the monitor's own
+  # daily cron two hours later. Both said "4 renewed", and the second read as "renewed just now".
+  # The age was already an input; it just never reached the card.
+  drain_fixture 16 3
+  export CERT_WARDEN_CONCLUSION="success"
+  run run_fact_for_age 0
+  assert_output "success (just now)" # workflow_run: truncated hours would print a bare "0h ago"
+  run run_fact_for_age 5
+  assert_output "success (5h ago)"
+  run run_fact_for_age 47
+  assert_output "success (47h ago)"
+  run run_fact_for_age 48 # past two days, hours stop being a quantity anyone reads
+  assert_output "success (2d ago)"
+  run run_fact_for_age 168
+  assert_output "success (7d ago)"
+}
+
+@test "an unusable metrics age makes no claim about when the run happened" {
+  # Silence beats a wrong timestamp. Empty is the caller failing to resolve updatedAt; negative
+  # is runner clock skew, which must not render as "(-1h ago)".
+  drain_fixture 16 3
+  export CERT_WARDEN_CONCLUSION="success"
+  run run_fact_for_age ""
+  assert_output "success"
+  run run_fact_for_age "-1"
+  assert_output "success"
+}
+
+@test "the step summary dates the warden run too" {
+  # The run page is where an operator lands from the card's link; it must not tell the older story.
+  drain_fixture 16 3
+  CERT_WARDEN_CONCLUSION="success" METRICS_AGE_HOURS="2" run bash "${MONITOR_SH}"
+  assert_success
+  run grep -c '| Cert Warden run | success (2h ago) |' "${GITHUB_STEP_SUMMARY}"
+  assert_output "1"
 }
 
 @test "onboarding zones waiting on a first certificate appear only when there are some" {

@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0](https://github.com/dsb-norge/cert-warden/compare/v1.1.1...v1.2.0) (2026-09-09)
+
+
+### Features
+
+* **monitor:** date the warden run on the card and step summary ([7c97d11](https://github.com/dsb-norge/cert-warden/commit/7c97d11df6758c3105311724e6c646300d1bf15b))
+* **monitor:** date the warden run on the card and step summary ([#39](https://github.com/dsb-norge/cert-warden/issues/39)) ([f1ee5a9](https://github.com/dsb-norge/cert-warden/commit/f1ee5a9f15161e7acd58d99d94edae415e5b4831))
+
 ## [1.1.1](https://github.com/dsb-norge/cert-warden/compare/v1.1.0...v1.1.1) (2026-09-08)
 
 

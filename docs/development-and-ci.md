@@ -80,6 +80,15 @@ stricter than "contains no mutable ref" — the head-SHA attempt satisfied that 
 **Every preview ref is deleted when the PR closes.** Pin one for validation, never for
 production — for that, wait for a release.
 
+`cleanup-preview` deletes each ref with `DELETE /repos/{owner}/{repo}/git/refs/{ref}`, and
+because `matching-refs` returns refs *with* their leading `refs/`, the ref is appended **whole**.
+Stripping it lands on `/git/tags/{sha}` — the tag-**object** endpoint, which `404`s for a
+lightweight tag. That was a live bug: every delete failed, a trailing
+`|| echo "(already gone?)"` logged the failure as reassurance, and 22 tags from PRs #32–#40
+outlived their PRs with the job green throughout. The job now re-lists `matching-refs` after the
+loop and fails if anything survived — the delete call's exit status is not taken as proof.
+`tests/unit/preview-refs.bats` asserts both structurally.
+
 ## Releases
 
 - `release-please.yml` authenticates as the org's **`dsb-norge-cert-warden-releaser`**

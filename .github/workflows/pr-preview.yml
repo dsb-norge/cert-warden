@@ -264,10 +264,40 @@ jobs:
           if ((${#refs[@]} == 0)); then
             echo "no preview refs for PR ${PR_NUMBER} (already absent)"
           fi
+          # Deleting a ref is DELETE /repos/{owner}/{repo}/git/refs/{ref}, and matching-refs
+          # already hands back the ref WITH its leading `refs/` — so it is appended whole.
+          # Stripping it (`${ref#refs/}`) lands on /git/tags/{sha}, the tag-OBJECT endpoint,
+          # which 404s for a lightweight tag. That was the bug: every delete failed, and a
+          # trailing `|| echo "(already gone?)"` reported the failure as reassurance, so 22
+          # tags from PRs #32-#40 outlived their PRs with the job green throughout.
           for ref in "${refs[@]}"; do
-            gh api -X DELETE "repos/${REPO}/git/${ref#refs/}" && echo "deleted ${ref}" ||
-              echo "could not delete ${ref} (already gone?)"
+            if gh api -X DELETE "repos/${REPO}/git/${ref}" >/dev/null 2>&1; then
+              echo "deleted ${ref}"
+            else
+              # Not fatal on its own — the sweep below is what decides, and it checks the repo
+              # rather than the exit status of this call.
+              echo "delete call failed for ${ref}; verifying against the repo below"
+            fi
           done
+
+          # A sweep that reports success without looking is how the broken endpoint stayed
+          # hidden for two weeks. Re-list and fail if anything survived.
+          #
+          # Deliberately matching-refs + anchored grep, NOT `gh api git/refs/<ref>` as an
+          # existence probe: that endpoint prefix-matches and returns an ARRAY, so probing
+          # preview/pr-3 matches preview/pr-32 and probing a deleted preview/pr-32 still
+          # matches preview/pr-32-9d8c097. Only the anchored match is exact.
+          remaining="$(
+            gh api "repos/${REPO}/git/matching-refs/tags/preview/pr-${PR_NUMBER}" \
+              --jq '.[].ref' 2>/dev/null |
+              grep -E "^refs/tags/preview/pr-${PR_NUMBER}(-[0-9a-f]+)?\$" || true
+          )"
+          if [[ -n "${remaining}" ]]; then
+            echo "::error::preview refs for PR ${PR_NUMBER} survived cleanup:"
+            echo "${remaining}"
+            exit 1
+          fi
+          echo "verified: no preview refs remain for PR ${PR_NUMBER}"
 
       # The PR merge ref can be gone on closed events — check out the default branch just to
       # get scripts/ci/sticky-comment.sh (single source of the marker format).

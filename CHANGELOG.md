@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.1](https://github.com/dsb-norge/cert-warden/compare/v1.2.0...v1.2.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **ci:** delete preview tags via the ref endpoint, and verify the sweep ([5784f18](https://github.com/dsb-norge/cert-warden/commit/5784f18af980b9aa9a326c80d93a224321920169))
+* **ci:** delete preview tags via the ref endpoint, and verify the sweep ([#41](https://github.com/dsb-norge/cert-warden/issues/41)) ([a4044f2](https://github.com/dsb-norge/cert-warden/commit/a4044f2c5dc8df87ed858c8a1c72fc5008934f9b))
+
 ## [1.2.0](https://github.com/dsb-norge/cert-warden/compare/v1.1.1...v1.2.0) (2026-09-09)
 
 

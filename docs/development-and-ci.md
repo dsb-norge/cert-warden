@@ -25,6 +25,21 @@ Commit messages are load-bearing: release-please derives versions and the public
 - **Never reference private repositories** in commit messages — they end up in the public
   changelog. The private-reference guard fails the PR if you do.
 
+**A merge commit's own subject must not parse as a conventional commit.** The `main` ruleset
+permits merge commits only (`allowed_merge_methods: ["merge"]`), so every PR lands as one. If
+the repository's `merge_commit_title` setting is `PR_TITLE`, that merge commit inherits the PR's
+conventional subject, `main` then carries **two** parseable commits per PR — the branch commit
+and the merge commit — and release-please writes the change to the changelog twice. v1.2.0 and
+v1.2.1 each shipped with a duplicate entry that way, unnoticed, because nothing about it is
+visible until you read the published release notes.
+
+The correct value is `MERGE_MESSAGE`, which gives the classic `Merge pull request #N from
+<branch>`: release-please ignores it (not a conventional commit) and commitlint skips it via its
+`defaultIgnores` — the behaviour `scripts/ci/lint-commits.mjs` already assumes.
+`merge_commit_message` stays `PR_BODY`. Both settings are Terraform-managed centrally in the
+org's GitHub configuration, **not** in this repo: change them there, or the next apply reverts a
+UI edit.
+
 ## Preview refs (the no-ritual test mechanism)
 
 On every same-repo PR, `pr-preview.yml`:

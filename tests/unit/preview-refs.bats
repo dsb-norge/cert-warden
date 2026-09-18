@@ -102,3 +102,55 @@ YML
   assert_failure
   assert_output --partial "usage:"
 }
+
+# --- Structural tests: the cleanup job's delete call ------------------------------------
+#
+# These assert on pr-preview.yml itself rather than on a script, because the cleanup loop is
+# inline YAML. They exist because the delete had been silently broken since the job was
+# written: it called the tag-OBJECT endpoint, which 404s for a lightweight tag, and the
+# failure was swallowed by a `|| echo "(already gone?)"`. 22 tags from merged PRs #32-#40
+# accumulated on the repo with the job green the whole time.
+
+PR_PREVIEW_YML="${REPO_ROOT}/.github/workflows/pr-preview.yml"
+
+# The workflow EXPLAINS the old bug in a comment, so a raw grep for the broken form matches the
+# warning against it — the test would fail on its own documentation. Strip comment lines first
+# and assert on what actually executes.
+cleanup_code() {
+  grep -vE '^[[:space:]]*#' "${PR_PREVIEW_YML}" >"${BATS_TEST_TMPDIR}/code.yml"
+  echo "${BATS_TEST_TMPDIR}/code.yml"
+}
+
+@test "cleanup deletes refs via the ref endpoint, not the tag-object endpoint" {
+  code="$(cleanup_code)"
+
+  # The listed ref already carries its leading refs/, so it is appended WHOLE:
+  #   refs/tags/preview/pr-N -> /git/refs/tags/preview/pr-N   (delete a reference)
+  # shellcheck disable=SC2016 # the literal ${REPO}/${ref} IS the pattern; expanding it here
+  run grep -cF 'gh api -X DELETE "repos/${REPO}/git/${ref}"' "${code}"
+  assert_output "1"
+
+  # THE regression: stripping refs/ yields /git/tags/... — the tag-object endpoint, which 404s
+  # for a lightweight tag, so every delete failed.
+  # shellcheck disable=SC2016 # ditto — matching the broken form verbatim
+  run grep -cF 'git/${ref#refs/}' "${code}"
+  assert_output "0"
+
+  # And the failure must not be swallowed into a reassuring log line again.
+  run grep -c 'already gone?' "${code}"
+  assert_output "0"
+}
+
+@test "cleanup verifies the sweep instead of trusting the delete calls" {
+  code="$(cleanup_code)"
+
+  # Re-list after the loop and fail if anything survived. Anchored matching-refs, not a
+  # `git/refs/<ref>` existence probe — that endpoint prefix-matches and returns an array, so it
+  # answers a different question than the one being asked.
+  run grep -cF 'survived cleanup' "${code}"
+  assert_output "1"
+
+  # The guard is worthless if it cannot fail the job.
+  run grep -cE '^[[:space:]]+exit 1$' "${code}"
+  [ "${output}" -ge 1 ]
+}

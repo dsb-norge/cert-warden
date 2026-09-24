@@ -31,6 +31,19 @@ scoped, justified suppression — never a disabled job.
 - **Escalation**: a finding you can neither fix nor confidently justify → treat as a blocker,
   not a nuisance; raise it with the maintainer group.
 
+## actionlint (workflow syntax and expressions)
+
+Not a security audit, but the same rule applies: its suppressions live in
+`.github/actionlint.yaml`, scoped by path **and** message. There is one, and it expires:
+
+- `concurrency.queue` in `reusable-warden.yml` and `reusable-sweeper.yml`. actionlint v1.7.12
+  predates GitHub's `queue` key (2026-05) and rejects it as an unexpected key
+  (rhysd/actionlint#654). Both files need it for the vault lock
+  ([contracts.md §5](contracts.md#5-the-vault-lock-reusable-workflows)). Any other key, and
+  `queue` in any other file, still fails. zizmor 1.30.0 parses the key without complaint.
+  **Delete the file when the pinned actionlint accepts `queue`.** The Renovate bump of
+  `ACTIONLINT_VERSION` is the moment to try.
+
 ## pinact (pin enforcement)
 
 - **What**: verifies every third-party `uses:` (workflows AND composite actions) is pinned to

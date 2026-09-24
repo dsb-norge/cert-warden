@@ -138,7 +138,9 @@ What each bumped tool can newly break:
 - **zizmor** — new releases ship new audits. A new finding is a real signal: fix it, or add a
   scoped suppression *with a justification* to `zizmor.yml`
   (see [security-tooling.md](security-tooling.md)).
-- **actionlint / yamllint** — new rules, same deal.
+- **actionlint / yamllint** — new rules, same deal. An actionlint bump is also the moment to
+  try deleting `.github/actionlint.yaml`: its one suppression expires once actionlint accepts
+  `concurrency.queue` (see [security-tooling.md](security-tooling.md)).
 - **bats / bashcov** — run both suites, not just the unit one. The bashcov 3.x -> 4.x bump is
   done (2026-09-08); what it taught is worth keeping, because the same shape will recur. 4.x
   requires `simplecov ~> 1.1`, and simplecov 1.x changed the summary in three ways that each

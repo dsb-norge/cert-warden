@@ -4,8 +4,8 @@ name: reusable-sweeper
 # needed Key Vault roles) -> sweep. DEFAULT IS A DRY RUN (log-only: true); see
 # docs/reference-usage.md for the graduation ladder to scheduled destructive sweeps.
 #
-# IMPORTANT caller contract: put this job in the SAME concurrency group as the warden for the
-# environment — both mutate the same vault and must never race.
+# The job holds the same vault lock as reusable-warden.yml — both mutate the same vault and must
+# never race — so the caller needs no concurrency group (docs/contracts.md §5).
 #
 # Caller permissions needed: id-token: write.
 
@@ -65,6 +65,12 @@ jobs:
   sweep:
     name: "sweep (${{ inputs.environment }})"
     runs-on: ${{ inputs.runs-on }}
+    # The vault lock, shared with reusable-warden.yml; the reasoning is in the comment there.
+    # This block must stay identical to the warden's (tests/unit/vault-lock.bats).
+    concurrency:
+      group: cert-warden-vault-${{ inputs.key-vault-name }}
+      cancel-in-progress: false # never interrupt a run mid-delete
+      queue: max
     outputs:
       candidates-count: ${{ steps.sweep.outputs.candidates-count }}
       candidates-json: ${{ steps.sweep.outputs.candidates-json }}

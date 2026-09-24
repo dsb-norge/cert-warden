@@ -2,9 +2,10 @@ name: reusable-warden
 #
 # The packaged warden shape: OIDC login -> setup-lego -> issue/renew into Key Vault -> upload
 # the metrics artifact. One environment per call — put your matrix in the caller (with
-# max-parallel: 1 for Let's Encrypt hygiene) and share a concurrency group with the sweeper
-# per environment. See docs/reference-usage.md for canonical callers and
-# docs/consumer-prerequisites.md for the Azure-side requirements.
+# max-parallel: 1 for Let's Encrypt hygiene). The job holds the vault lock it shares with the
+# sweeper itself, so the caller needs no concurrency group (docs/contracts.md §5). See
+# docs/reference-usage.md for canonical callers and docs/consumer-prerequisites.md for the
+# Azure-side requirements.
 #
 # Caller permissions needed: id-token: write (OIDC login). Nothing else — this workflow never
 # checks out the calling repo.
@@ -140,6 +141,18 @@ jobs:
   warden:
     name: "warden (${{ inputs.environment }})"
     runs-on: ${{ inputs.runs-on }}
+    # The vault lock, shared with reusable-sweeper.yml: both mutate the same Key Vault and must
+    # never race. It is keyed on the vault, the resource actually shared, so every caller that
+    # targets one serialises without agreeing on a group name, and GitHub scopes the group to the
+    # calling repository. `queue: max` keeps up to 100 pending runs where GitHub's default keeps
+    # one and cancels it when a third arrives. Runs are not interchangeable — a cron renewal
+    # pass, a deploy-chained onboarding pass, a sweep — so the newest arrival is not a substitute
+    # for the one it would cancel. The group name is a contract (docs/contracts.md §5), and this
+    # block must stay identical to the sweeper's (tests/unit/vault-lock.bats).
+    concurrency:
+      group: cert-warden-vault-${{ inputs.key-vault-name }}
+      cancel-in-progress: false # never interrupt a run mid-import
+      queue: max
     outputs:
       metrics-artifact-name: ${{ steps.names.outputs.artifact }}
       zones-total: ${{ steps.warden.outputs.zones-total }}

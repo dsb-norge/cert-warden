@@ -170,7 +170,8 @@ subprocess, so a containerised full run silently reports the unit-only figure.
 ## 7. Running locally
 
 ```bash
-# unit (helper libs are vendored in tests/vendor — no BATS_LIB_PATH setup needed)
+# unit (helper libs are vendored in tests/vendor — no BATS_LIB_PATH setup needed;
+# vault-lock.bats reads the workflows with yq, mikefarah v4, preinstalled on GitHub's runners)
 bats tests/unit
 
 # integration (docker + lego v5 on PATH)

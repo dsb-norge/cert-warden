@@ -20,9 +20,10 @@ The examples below write `@v1` for brevity — substitute your pin style.
 
 ## 1. Full suite (recommended shape)
 
-Three caller workflows. Note the two contracts in comments: the **shared concurrency group**
-(warden and sweeper must never race on the same vault) and the **workflow name** (the monitor
-resolves the warden's runs by name).
+Three caller workflows. Note the contract in a comment: the **workflow name** (the monitor
+resolves the warden's runs by name). The callers need no concurrency group: the warden and the
+sweeper hold a lock per vault themselves, so they never race on it (see
+[The vault lock](#the-vault-lock) below).
 
 ### `cert-warden.yml`
 
@@ -68,9 +69,6 @@ jobs:
               key-vault-name: "kv-my-web-certs-dev"
               dns-rg-name: "rg-my-dns-dev"
               le-environment: "staging"
-    concurrency:
-      group: cert-warden-${{ matrix.environment }} # shared with the sweeper — same vault
-      cancel-in-progress: false
     permissions:
       id-token: write # OIDC login
     uses: dsb-norge/cert-warden/.github/workflows/reusable-warden.yml@v1
@@ -192,9 +190,6 @@ jobs:
               azure-subscription-id: "00000000-0000-0000-0000-000000000000"
               azure-client-id: "00000000-0000-0000-0000-000000000000"
               key-vault-name: "kv-my-web-certs-dev"
-    concurrency:
-      group: cert-warden-${{ matrix.environment }} # NEVER race the warden on the same vault
-      cancel-in-progress: false
     permissions:
       id-token: write
     uses: dsb-norge/cert-warden/.github/workflows/reusable-sweeper.yml@v1
@@ -232,6 +227,30 @@ keeps getting evaluated normally.
 **Sweeper graduation ladder** (default-safe by design): ① dispatch dry-runs and review the
 candidate list → ② one destructive dispatch (`log_only: false`; the `max-deletions` spike
 guard stays armed) → ③ uncomment the cron. Full auto is a two-line change.
+
+## The vault lock
+
+The warden and sweeper jobs wait for each other on the vault they target, and there is nothing
+to configure. The contract is in [contracts.md §5](contracts.md#5-the-vault-lock-reusable-workflows).
+What a caller needs to know:
+
+- **Don't wrap the warden or the sweeper in a concurrency group.** Up to v1.2.1 this page told
+  you to. To migrate, remove that group from **both** callers in the same change that bumps
+  **both** pins past v1.2.1:
+  - Remove it any earlier and the warden and sweeper have no lock at all.
+  - Move only one of them and they don't exclude each other either: one waits on the suite's
+    lock and the other on your old group.
+  - Keep it after the bump and it still works, but its default queue holds only one pending
+    run, so it still cancels a waiting run before that run reaches the suite's lock.
+  - If you must keep one, give it `queue: max`, and never name it `cert-warden-vault-…`. The
+    calling job would hold the very lock that the job it calls waits for.
+- **Never `cancel-in-progress: true`** on a workflow or job that calls the warden or the
+  sweeper. It cancels the whole run, including a job that holds the lock.
+- **One vault, one repository.** Concurrency groups are per repository, so the lock can't see a
+  second repository that manages the same vault.
+- **Queued runs all run.** After a burst of deploys, the deploy-chained warden runs wait and then
+  run back to back, and each one after the first finds little or nothing to do. That is the price
+  of never dropping a scheduled renewal pass that happened to be waiting.
 
 ## Pacing a large fleet
 
@@ -475,4 +494,6 @@ Enabled by design, but **unsupported** — the supported channel is the
 
 When the packaged shapes don't fit, build your own workflow from
 `dsb-norge/cert-warden/actions/{setup-lego,warden,monitor,sweeper}` — same contracts, same
-pins. The reusable workflows are themselves ~60-line examples of exactly this.
+pins. The reusable workflows are themselves ~60-line examples of exactly this. A job of yours
+that writes to the vault should join [the vault lock](contracts.md#5-the-vault-lock-reusable-workflows)
+by using its group name, or it races the packaged warden and sweeper.

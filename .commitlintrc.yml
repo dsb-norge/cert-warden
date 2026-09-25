@@ -1,6 +1,6 @@
 # Conventional-commit rules — load-bearing: release-please derives versions and the public
-# CHANGELOG from commit messages, and this repo merges with merge commits (never squash), so
-# every commit must parse. CI runs this via scripts/ci/lint-commits.mjs (lockfile-pinned
+# CHANGELOG from commit messages, and this repo rebase-merges (no squash, no merge commits), so
+# every commit lands on main verbatim and must parse. CI runs this via scripts/ci/lint-commits.mjs (lockfile-pinned
 # commitlint, root package.json); install the local hook with scripts/install-git-hooks.sh.
 extends:
   - "@commitlint/config-conventional"

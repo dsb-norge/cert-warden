@@ -1,6 +1,6 @@
 <!--
-Every commit must be a conventional commit (this repo merges with merge commits — commits land
-on main verbatim and drive releases + the public changelog). CI posts an explainer if not.
+Every commit must be a conventional commit (this repo rebase-merges — every commit lands on main
+verbatim and drives releases + the public changelog). CI posts an explainer if not.
 
 New reusable-workflow inputs need a justification: inputs are configuration, not behaviour
 flags — divergent behaviour belongs in a consumer composing the actions directly.

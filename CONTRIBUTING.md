@@ -9,7 +9,7 @@ The short version:
 1. `scripts/install-git-hooks.sh` (catches commit-message problems before CI does).
 2. Branch, commit conventionally, open a PR. CI posts a preview ref you can consume from any
    repo; nothing merges without green `ci-conclusion` + `preview-consume-e2e`.
-3. Merge commits only (never squash). Never reference private repositories anywhere —
+3. Rebase-merge only (no squash, no merge commits). Never reference private repositories anywhere —
    including commit messages (they surface in the public changelog); CI enforces this.
 
 Security tooling and how to respond to its findings: [docs/security-tooling.md](docs/security-tooling.md).

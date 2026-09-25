@@ -7,7 +7,8 @@
 2. Open a PR. CI runs the full layer stack ([testing.md](testing.md)); the PR immediately gets
    a **preview ref** in a sticky comment (see §Preview refs) — use it to test from a calling
    repo with zero manual steps.
-3. Merge (merge commit — this repo never squashes). Nothing preview-related lands on `main`.
+3. Merge with **rebase**, the only method the `main` ruleset allows: no squash, no merge commits
+   (see §Commits). Nothing preview-related lands on `main`.
 4. release-please accumulates merged changes into a single **release PR**; merging that PR
    tags `vX.Y.Z`, publishes the (immutable) GitHub Release, moves the floating `v1` tag, and
    the annotated internal refs + docs bump themselves.
@@ -15,7 +16,8 @@
 ## Commits
 
 Commit messages are load-bearing: release-please derives versions and the public
-`CHANGELOG.md` from them, and merge commits mean every PR commit lands on `main` verbatim.
+`CHANGELOG.md` from them, and rebase-merging means every PR commit lands on `main` individually
+and verbatim.
 
 - `feat:` → minor, `fix:` → patch, `feat!:`/`BREAKING CHANGE:` footer → major,
   `docs/test/ci/chore/refactor/build/perf:` → no release.
@@ -25,20 +27,30 @@ Commit messages are load-bearing: release-please derives versions and the public
 - **Never reference private repositories** in commit messages — they end up in the public
   changelog. The private-reference guard fails the PR if you do.
 
-**A merge commit's own subject must not parse as a conventional commit.** The `main` ruleset
-permits merge commits only (`allowed_merge_methods: ["merge"]`), so every PR lands as one. If
-the repository's `merge_commit_title` setting is `PR_TITLE`, that merge commit inherits the PR's
-conventional subject, `main` then carries **two** parseable commits per PR — the branch commit
-and the merge commit — and release-please writes the change to the changelog twice. v1.2.0 and
-v1.2.1 each shipped with a duplicate entry that way, unnoticed, because nothing about it is
-visible until you read the published release notes.
+**Rebase only, because a merge commit lists the PR twice.** The `main` ruleset allows only
+`rebase` (`allowed_merge_methods: ["rebase"]`, with linear history), and squash is off. Squash
+would collapse a PR into one commit. The reason merge commits are off too is less obvious. GitHub
+puts the PR title into every merge commit, as its subject or as its body, and no setting avoids
+that: it accepts only the title/body pairs `PR_TITLE`+`PR_BODY`, `PR_TITLE`+`BLANK` and
+`MERGE_MESSAGE`+`PR_TITLE`. release-please parses conventional lines in a commit **body** as
+extra commits as well as the subject, so the conventional PR title in a merge commit counts as a
+second copy of the change.
 
-The correct value is `MERGE_MESSAGE`, which gives the classic `Merge pull request #N from
-<branch>`: release-please ignores it (not a conventional commit) and commitlint skips it via its
-`defaultIgnores` — the behaviour `scripts/ci/lint-commits.mjs` already assumes.
-`merge_commit_message` stays `PR_BODY`. Both settings are Terraform-managed centrally in the
-org's GitHub configuration, **not** in this repo: change them there, or the next apply reverts a
-UI edit.
+Every release before the switch has this. v1.2.0 and v1.2.1 shipped with a duplicate entry per
+PR, because the merge commit took the PR title as its subject. Switching the subject to the
+classic `Merge pull request #N …` (`MERGE_MESSAGE`) only moved the title into the body, and
+v1.3.0's duplicate was removed from the release PR by hand before publishing. Rebase adds no
+commit of its own, so there is nothing left to parse twice. Nothing about the duplicate is
+visible until you read the published release notes, and a published Release is immutable.
+
+Two side effects of rebase-merging:
+
+- A merged commit gets a **new SHA** on `main`, because GitHub re-creates it. The PR branch is
+  therefore not an ancestor of `main`, so `git branch -d` refuses to delete it and tools report
+  it as "not fully merged". Confirm the content is upstream with `git cherry main <branch>`
+  (every line prefixed `-`), then delete it with `-D`.
+- The merge settings are Terraform-managed centrally in the org's GitHub configuration, **not**
+  in this repo. Change them there, or the next apply reverts a UI edit.
 
 ## Preview refs (the no-ritual test mechanism)
 

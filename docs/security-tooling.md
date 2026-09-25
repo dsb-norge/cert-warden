@@ -67,7 +67,7 @@ Not a security audit, but the same rule applies: its suppressions live in
 ## commitlint
 
 - **What/why**: conventional commits drive release-please (versions + public changelog); this
-  repo merges with merge commits, so every commit must parse. Failures post a sticky PR
+  repo rebase-merges, so every commit lands on `main` and must parse. Failures post a sticky PR
   comment with per-commit reasons and the reword recipe.
 - **How**: `scripts/ci/lint-commits.mjs` + the root `package.json`/`package-lock.json`
   (`npm ci --ignore-scripts` — the lockfile's integrity hashes pin the whole dependency

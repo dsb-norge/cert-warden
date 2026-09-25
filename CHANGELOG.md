@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/dsb-norge/cert-warden/compare/v1.2.1...v1.3.0) (2026-09-25)
+
+
+### Features
+
+* **workflows:** the warden and the sweeper hold the vault lock themselves ([97fabfb](https://github.com/dsb-norge/cert-warden/commit/97fabfb51ffcde860c41cd3dd6a9c7418c000677))
+
 ## [1.2.1](https://github.com/dsb-norge/cert-warden/compare/v1.2.0...v1.2.1) (2026-09-18)
 
 

@@ -29,9 +29,8 @@ jobs:
   canary:
     permissions:
       id-token: write
-    concurrency:
-      group: cert-warden-<env> # same group as the real warden — same vault
-      cancel-in-progress: false
+    # No concurrency group: the warden locks the vault it targets, so the canary waits for the
+    # real dev warden and the sweeper on this vault by itself.
     uses: dsb-norge/cert-warden/.github/workflows/reusable-warden.yml@v1
     with:
       environment: "canary"

@@ -1,7 +1,7 @@
 # Contracts
 
-The suite's public API is more than the action/workflow inputs — three cross-component
-contracts are covered by SemVer. Breaking any of them is a **major** release with a migration
+The suite's public API is more than the action/workflow inputs — four cross-component
+contracts (§1–3, §5) are covered by SemVer. Breaking any of them is a **major** release with a migration
 note.
 
 ## 1. The environment-variable contract (scripts)
@@ -163,3 +163,34 @@ bearer token for `BOT_API_AUDIENCE` — the API of the
 [Teams Notification Bot](https://github.com/dsb-norge/teams-notifier-function-app). That
 contract is owned by the bot; this repo pins the request shape in its integration tests and
 revisits on a breaking bot-API change.
+
+## 5. The vault lock (reusable workflows)
+
+`reusable-warden.yml` and `reusable-sweeper.yml` both write to the Key Vault, so their jobs share
+one GitHub concurrency group per vault:
+
+```yaml
+concurrency:
+  group: cert-warden-vault-${{ inputs.key-vault-name }}
+  cancel-in-progress: false
+  queue: max
+```
+
+- **Keyed on the vault, not the environment.** Every run that targets a vault waits for the
+  others: the warden, a sweep, a canary pointed at the dev vault. Callers don't have to agree
+  on a group name.
+- **Nothing is cancelled**, whether it's in progress or waiting. `queue: max` keeps up to 100
+  pending runs per vault and starts them roughly in the order they began waiting (GitHub's
+  ordering is best-effort). The order doesn't matter, because every run reads the vault fresh.
+  GitHub's default queue holds only one pending run, and a third arrival cancels it. That
+  silently dropped work, because runs are not interchangeable: a scheduled renewal pass, a
+  deploy-chained pass that renews nothing, a sweep.
+- **Per calling repository**, like every concurrency group. Two repositories that manage the
+  same vault are not serialised against each other, so a vault should have one managing
+  repository.
+- **The group name is public API.** A workflow that composes the actions directly and writes
+  to the vault joins the lock by using the same group, with `cancel-in-progress: false` and
+  `queue: max`. Renaming the group is a major release.
+- **A caller must not cancel around it.** A `cancel-in-progress: true` group on the calling
+  workflow or job still cancels the whole run, including a job that holds the lock or is
+  waiting for it.

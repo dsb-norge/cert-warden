@@ -1,0 +1,12 @@
+# actionlint configuration (auto-discovered by `actionlint` run from the repo root).
+#
+# One suppression, with an expiry condition rather than a design justification:
+# actionlint v1.7.12 predates GitHub's `concurrency.queue` key (2026-05) and rejects it as an
+# unexpected key (rhysd/actionlint#654). The two reusable workflows that hold the vault lock
+# need it. Scoped to those files and that one message, so any other concurrency mistake there
+# still fails. Drop this file as soon as the pinned actionlint accepts `queue`.
+# See docs/security-tooling.md.
+paths:
+  .github/workflows/reusable-{warden,sweeper}.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'

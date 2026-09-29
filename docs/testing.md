@@ -190,8 +190,12 @@ shellcheck ... && shfmt -d . && yamllint --strict . && actionlint && zizmor . &&
 warden passes flags v5 introduced, so lego answers with `flag provided but not defined: -path`
 buried under its full usage text, and the tests that never reach lego (e2e-5, e2e-14) still pass —
 which reads like a real regression rather than a missing prerequisite. Check `lego --version`
-before debugging an e2e wall; `go install github.com/go-acme/lego/v5/cmd/lego@<pin>` (the `v5` in
-the module path is what selects the major) is the fix.
+before debugging an e2e wall; `go install github.com/go-acme/lego/v5@<pin>` is the fix — the `v5`
+in the module path selects the major, and v5 moved the CLI to the module root, so the v4-era
+`…/cmd/lego` path fails with "does not contain package" (same command as `setup-lego`). v5 needs
+Go ≥ 1.26; an older `go` fetches that toolchain itself. To keep a v4 on `PATH` for other work,
+install into a directory of its own (`GOBIN=<dir>`) and put it first on `PATH` only for
+`bats tests/integration`.
 
 Bumping any of those tools: run this same set **at the new versions** first — see
 [dependency-bumps.md](dependency-bumps.md) §4.

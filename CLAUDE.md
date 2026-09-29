@@ -25,6 +25,36 @@ Copilot's PR review is supposed to catch what the scanners catch, and it often d
   per finding ID with the reason. The script skips them, and flags rows whose finding has
   closed so they can be pruned.
 
+## Pull requests and the Copilot review loop
+
+- **PRs here are opened ready for review, not as drafts.** This is the maintainer's decision
+  for this repository (2026-09-29), and it overrides a user-level "draft PR" default. Don't ask
+  before marking a cert-warden PR ready, and don't open one as a draft. The reason is that
+  Copilot's automatic review (a `main` ruleset) only runs on ready PRs. Being ready is not
+  permission to merge: merging still waits for the maintainer.
+  Hand a PR to the maintainer only once every thread is resolved. Each push triggers a fresh
+  review, so loop: push, wait for the review, answer every thread. Stop when a review leaves
+  nothing open, or when a thread needs the maintainer's decision.
+- **A review can come back empty-handed.** Copilot's review is charged to the account that
+  triggered it. When that account is out of Copilot quota, the "review" is a single comment:
+  "Copilot was unable to review this pull request because the user who requested the review has
+  reached their quota limit." There are no threads. Report that and hand the PR over. Don't keep
+  pushing or re-requesting to get a review; each attempt fails the same way until the quota
+  resets.
+- **Every review thread gets an answer before it is resolved.** `main`'s rulesets block
+  merging on any unresolved thread, and `--admin` does not bypass it. Answer each thread with
+  the proposed change, a different fix, or a rationale; recurring false positives go under
+  "Review findings rejected on sight" in
+  [docs/development-and-ci.md](docs/development-and-ci.md#review-threads-every-one-gets-an-answer).
+  Reply saying which one it is, with the fixing commit, *then* resolve. Reviews that land
+  after merge are fixed in the next PR and answered on the old thread.
+- **Mechanics** (replace `N` with the PR number):
+  - List threads:
+    `gh api graphql -f query='{repository(owner:"dsb-norge",name:"cert-warden"){pullRequest(number:N){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId path body}}}}}}}'`
+  - Reply: `gh api repos/dsb-norge/cert-warden/pulls/N/comments/<databaseId>/replies -f body=…`
+  - Resolve:
+    `gh api graphql -f query='mutation{resolveReviewThread(input:{threadId:"<id>"}){thread{isResolved}}}'`
+
 ## Things that bite
 
 - **This repo is public.** Never name a private repository in files, commit messages or PR

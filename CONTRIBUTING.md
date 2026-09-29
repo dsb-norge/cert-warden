@@ -13,3 +13,5 @@ The short version:
    including commit messages (they surface in the public changelog); CI enforces this.
 
 Security tooling and how to respond to its findings: [docs/security-tooling.md](docs/security-tooling.md).
+After merging a PR, and before merging a release PR, check the Security tab with
+`bash scripts/security-findings.sh --wait` — see [docs/security-findings.md](docs/security-findings.md).

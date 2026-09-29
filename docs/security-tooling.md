@@ -5,6 +5,15 @@ blocks you. The standing rule: **suppressions are code**. Each one lives in a co
 a written justification and gets reviewed like any change. A tool that's inconvenient gets a
 scoped, justified suppression — never a disabled job.
 
+## Checking the Security tab
+
+CI gates on zizmor, pinact and the guards below, but not on what lands in the **Security and
+quality** tab after a merge: a Dependabot advisory against a dependency already on `main`, a
+CodeQL Default Setup alert, a secret scanning hit. Those are checked at fixed points, **after every
+merge and before every release**, with `bash scripts/security-findings.sh --wait`. The routine, how
+to assess a finding, and the table of findings that are permanently ignored are in
+[security-findings.md](security-findings.md). Nothing is dismissed in GitHub.
+
 ## zizmor (workflow/action security audit)
 
 - **What**: static audits of `.github/workflows/*` and `action.yml` files — template

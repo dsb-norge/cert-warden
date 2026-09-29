@@ -4,11 +4,13 @@
 
 1. Branch from `main`; make changes with **conventional commits** (see §Commits — CI posts an
    explainer if a commit doesn't parse).
-2. Open a PR. CI runs the full layer stack ([testing.md](testing.md)); the PR immediately gets
-   a **preview ref** in a sticky comment (see §Preview refs) — use it to test from a calling
-   repo with zero manual steps.
+2. Open a PR **ready for review**, not as a draft: Copilot's automatic review skips drafts (see
+   §Review threads). CI runs the full layer stack ([testing.md](testing.md)); the PR immediately
+   gets a **preview ref** in a sticky comment (see §Preview refs) — use it to test from a
+   calling repo with zero manual steps.
 3. Merge with **rebase**, the only method the `main` ruleset allows: no squash, no merge commits
-   (see §Commits). Nothing preview-related lands on `main`.
+   (see §Commits). Every review thread must be resolved first. Nothing preview-related lands on
+   `main`.
 4. release-please accumulates merged changes into a single **release PR**; merging that PR
    tags `vX.Y.Z`, publishes the (immutable) GitHub Release, moves the floating `v1` tag, and
    the annotated internal refs + docs bump themselves. Before merging it, check the Security
@@ -61,6 +63,40 @@ Two side effects of rebase-merging:
   (every line prefixed `-`), then delete it with `-D`.
 - The merge settings are Terraform-managed centrally in the org's GitHub configuration, **not**
   in this repo. Change them there, or the next apply reverts a UI edit.
+
+## Review threads: every one gets an answer
+
+A `main` ruleset has Copilot review every PR that is ready for review, and it reviews again on
+every push. Its comments open review threads. `main`'s rulesets block the merge while any thread
+is unresolved, and `gh pr merge --admin` does **not** bypass that: the `Require PRs (Rebase)`
+ruleset has no bypass actors. Copilot's review is advisory, and it misses things the scanners
+catch (that is what [security-findings.md](security-findings.md) is for), but every thread it
+opens still needs an answer. Resolve each thread with one of:
+
+1. **The proposed change**, applied as suggested.
+2. **A different fix**, when the finding is right but the suggestion isn't the best remedy.
+3. **A rationale**, when the finding doesn't apply or the current code is deliberate: say why,
+   and if it is a recurring false positive, record it under
+   [Review findings rejected on sight](#review-findings-rejected-on-sight) so it isn't re-argued.
+
+Reply in the thread saying which of the three it is and linking the fixing commit, then resolve
+it. A silent resolve loses the reasoning. Human review threads are handled the same way.
+
+A PR is ready to hand over only when **every thread is resolved** and the review of the latest
+push has been read. Pushing a fix triggers a new review, so keep going until one comes back with
+nothing unresolved, or a thread needs a decision from a maintainer.
+
+A review can land **after** the PR merged. Handle those threads the same way: fix them in the
+next PR and reply on the old thread with a link to it.
+
+The review loop and this rule are ported from
+[dsb-norge/teams-notifier-function-app](https://github.com/dsb-norge/teams-notifier-function-app),
+so the two repositories review the same way.
+
+### Review findings rejected on sight
+
+Recurring review comments that don't apply to this repository. Answer them with the reason given
+here and resolve. Add an entry when the same false positive has been argued twice. None yet.
 
 ## Preview refs (the no-ritual test mechanism)
 

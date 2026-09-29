@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.1](https://github.com/dsb-norge/cert-warden/compare/v1.3.0...v1.3.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **warden:** count a zone as a renewal only once the warden has issued it ([bd27923](https://github.com/dsb-norge/cert-warden/commit/bd27923ba6289e6555f4e80cc3be8f70ec56e7d0))
+* **warden:** replace a placeholder with a first issuance, recorded as issued ([2d7ec23](https://github.com/dsb-norge/cert-warden/commit/2d7ec232b24a911e1b0f5475ed81ce3ac307c9ba))
+
 ## [1.3.0](https://github.com/dsb-norge/cert-warden/compare/v1.2.1...v1.3.0) (2026-09-25)
 
 

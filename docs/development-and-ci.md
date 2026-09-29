@@ -11,7 +11,17 @@
    (see §Commits). Nothing preview-related lands on `main`.
 4. release-please accumulates merged changes into a single **release PR**; merging that PR
    tags `vX.Y.Z`, publishes the (immutable) GitHub Release, moves the floating `v1` tag, and
-   the annotated internal refs + docs bump themselves.
+   the annotated internal refs + docs bump themselves. Before merging it, check the Security
+   tab ([security-findings.md](security-findings.md)).
+
+   **A release PR goes behind `main` whenever something merges after it.** The `main` ruleset's
+   required checks (`ci-conclusion`, `preview-consume-e2e`) are strict, meaning they must pass on
+   a head that is up to date with `main`, and they have no bypass actors. So a release PR that is
+   behind cannot be merged, not even with `gh pr merge --admin`, which fails with
+   `2 of 2 required status checks are expected`. release-please doesn't refresh the PR by itself
+   when the release notes don't change, which is the case after a `chore:` or `docs:` merge.
+   Rebase it (`gh pr update-branch <n> --rebase`, or **Update branch** in the UI), let CI pass
+   on the new head, then merge.
 
 ## Commits
 

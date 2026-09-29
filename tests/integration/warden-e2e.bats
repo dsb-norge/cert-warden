@@ -109,6 +109,30 @@ run_warden() {
   run bash "${WARDEN_SH}"
 }
 
+# Seed a placeholder at a zone's slot the way a consumer's IaC leaves one
+# (docs/consumer-prerequisites.md): a self-signed certificate object with the consumer's own tags
+# -- never the warden's -- a SAN covering the zone, and no lego metadata. The backing secret is a
+# real password-less PKCS#12, as Key Vault would serve it.
+seed_placeholder() {
+  local zone="$1" kv="$2" work
+  work="$(mktemp -d)"
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -nodes \
+    -keyout "${work}/key.pem" -out "${work}/cert.pem" -days 365 \
+    -subj "/CN=placeholder.${zone}" \
+    -addext "subjectAltName=DNS:${zone},DNS:*.${zone}" 2>/dev/null
+  openssl pkcs12 -export -in "${work}/cert.pem" -inkey "${work}/key.pem" -passout pass: \
+    -out "${work}/placeholder.pfx"
+  base64 -w0 <"${work}/placeholder.pfx" >"${CW_STATE}/secrets/${kv}"
+  jq -n --arg n "${kv}" --arg zone "${zone}" \
+    --arg nbf "$(date -u +'%Y-%m-%dT%H:%M:%S+00:00')" \
+    --arg exp "$(date -u -d '365 days' +'%Y-%m-%dT%H:%M:%S+00:00')" \
+    '{name: $n, sans: [$zone, ("*." + $zone)], notBefore: $nbf, expires: $exp,
+      cn: ("placeholder." + $zone),
+      tags: {Description: "Self-signed placeholder; Cert Warden writes the real certificate here."}}' \
+    >"${CW_STATE}/certs/${kv}.json"
+  rm -rf "${work}"
+}
+
 @test "e2e-1 first run: real ACME issuance lands verified certs in the vault" {
   run_warden
   assert_success
@@ -569,4 +593,50 @@ JSON
   run jq -r '.body.message.body[] | select(.type == "FactSet") | .facts[]
     | select(.title == "Renewed") | .value' "${sinklog}"
   assert_output --partial "renewals suppressed"
+}
+
+@test "e2e-16 a seeded placeholder is onboarding: renewals 'none' does not defer it" {
+  # Consumers seed a self-signed placeholder at a zone's slot name so that e.g. Application
+  # Gateway can reference the secret before the warden's first run. That object is not a
+  # certificate the warden issued, so it must not turn the zone into renewal work: the
+  # deploy-triggered run (renewals `none`, onboarding unlimited) is the one that has to issue it --
+  # the reason a caller chains the warden after its IaC deploy at all.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  # cw-test keeps its certificate: renewal work, which this run suppresses. zone2 starts over with
+  # only a placeholder in its slot. Its SAN covers the zone, so it passes the apex/SAN check -- the
+  # same as a real consumer's placeholder -- and nothing but the missing tag marks it as not ours.
+  kv="le-cert-staging-zone2-cw-test-internal-pfx"
+  rm -f "${CW_STATE}/certs/${kv}.json" "${CW_STATE}/secrets/${kv}" "${CW_STATE}/secrets/${kv}-meta"
+  seed_placeholder "zone2.cw-test.internal" "${kv}"
+
+  CERT_MAX_RENEWALS_PER_RUN=none run_warden
+  assert_success
+  assert_output --partial "renewals=none"
+  assert_output --partial "1 zone(s) hold a Key Vault object Cert Warden did not issue"
+  refute_output --partial "deferring zone2.cw-test.internal"
+
+  run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
+  assert_output "deferred"
+  run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .action' "${METRICS_OUT}"
+  refute_output "deferred"
+
+  # The slot now holds the CA's certificate (the shim verified its chain on import), stamped as
+  # the warden's -- the import replaced the placeholder's tags.
+  run jq -r '.cn' "${CW_STATE}/certs/${kv}.json"
+  refute_output "placeholder.zone2.cw-test.internal"
+  run jq -r '.tags.IssuedBy // ""' "${CW_STATE}/certs/${kv}.json"
+  refute_output ""
+
+  # From here on it IS renewal work: the next suppressed run defers it with its real window.
+  CERT_MAX_RENEWALS_PER_RUN=none run_warden
+  assert_success
+  refute_output --partial "did not issue"
+  run jq -e '.[] | select(.zone == "zone2.cw-test.internal")
+    | .action == "deferred" and .lifetime_fraction_remaining != null' "${METRICS_OUT}"
+  assert_success
 }

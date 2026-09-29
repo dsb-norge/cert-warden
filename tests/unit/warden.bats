@@ -471,6 +471,9 @@ AZSTUB
 # is asserted directly rather than left to whatever Azure's listing happens to return.
 
 # Stub `az keyvault certificate list` with a fixed answer; every other az call fails loudly.
+# Like the L2 shim, it ignores --query: a fixture must carry every key of the warden's projection
+# ({name, nbf, exp, issuedBy}) itself. A warden-issued certificate has `issuedBy`; an object
+# without it (a seeded placeholder) is written without one, which is also what real az returns.
 stub_az_cert_list() {
   mkdir -p "${BATS_TEST_TMPDIR}/bin"
   cat >"${BATS_TEST_TMPDIR}/bin/az" <<AZSTUB
@@ -494,9 +497,9 @@ AZSTUB
   publicZonesJson='[{"name":"a.example.test"},{"name":"c.example.test"},{"name":"b.example.test"}]'
   cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
 [
-  {"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00"},
-  {"name":"le-cert-staging-b-example-test-pfx","nbf":"2026-05-01T00:00:00+00:00","exp":"2026-10-01T00:00:00+00:00"},
-  {"name":"le-cert-staging-unrelated-pfx","nbf":"2026-01-01T00:00:00+00:00","exp":"2026-02-01T00:00:00+00:00"}
+  {"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00","issuedBy":"https://acme-staging-v02.api.letsencrypt.org/directory"},
+  {"name":"le-cert-staging-b-example-test-pfx","nbf":"2026-05-01T00:00:00+00:00","exp":"2026-10-01T00:00:00+00:00","issuedBy":"https://acme-staging-v02.api.letsencrypt.org/directory"},
+  {"name":"le-cert-staging-unrelated-pfx","nbf":"2026-01-01T00:00:00+00:00","exp":"2026-02-01T00:00:00+00:00","issuedBy":"https://acme-staging-v02.api.letsencrypt.org/directory"}
 ]
 JSON
   stub_az_cert_list
@@ -577,11 +580,86 @@ JSON
   loadConfig
   publicZonesJson='[{"name":"a.example.test"}]'
   cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
-[{"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00"}]
+[{"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00","issuedBy":"https://acme-staging-v02.api.letsencrypt.org/directory"}]
 JSON
   stub_az_cert_list
   resolveZoneProcessingOrder
   [ -z "${zoneCertNotAfter["a.example.test"]}" ]
+}
+
+# A consumer-seeded placeholder sits at exactly the slot name the warden writes to, so an
+# object-exists test cannot tell it from a real certificate. Only the warden's own tag can.
+@test "resolveZoneProcessingOrder treats an object the warden did not issue as no certificate" {
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"placeholder.example.test"},{"name":"issued.example.test"}]'
+  # The placeholder's 12-month validity would sort it AFTER every real certificate if it counted,
+  # and give a deferred record a window for a certificate the warden never issued.
+  cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
+[
+  {"name":"le-cert-staging-placeholder-example-test-pfx","nbf":"2026-09-01T00:00:00+00:00","exp":"2027-09-01T00:00:00+00:00","issuedBy":null},
+  {"name":"le-cert-staging-issued-example-test-pfx","nbf":"2026-08-01T00:00:00+00:00","exp":"2026-10-30T00:00:00+00:00","issuedBy":"https://acme-staging-v02.api.letsencrypt.org/directory"}
+]
+JSON
+  stub_az_cert_list
+
+  run resolveZoneProcessingOrder
+  assert_success
+  assert_output --partial "1 zone(s) hold a Key Vault object Cert Warden did not issue"
+
+  resolveZoneProcessingOrder
+  # No validity window for the placeholder: nothing the warden maintains is in service there.
+  [ -z "${zoneCertNotAfter["placeholder.example.test"]}" ]
+  [ -z "${zoneCertNotBefore["placeholder.example.test"]}" ]
+  [ "${zoneCertNotAfter["issued.example.test"]}" = "2026-10-30T00:00:00+00:00" ]
+  # ... and it sorts with the uncertified zones, last.
+  run echo "${zoneProcessingOrder[*]}"
+  assert_output "issued.example.test placeholder.example.test"
+}
+
+@test "resolveZoneProcessingOrder says nothing about seeded objects when there are none" {
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"a.example.test"},{"name":"new.example.test"}]'
+  cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
+[{"name":"le-cert-staging-a-example-test-pfx","nbf":"2026-06-01T00:00:00+00:00","exp":"2026-11-03T00:00:00+00:00","issuedBy":"https://acme-staging-v02.api.letsencrypt.org/directory"}]
+JSON
+  stub_az_cert_list
+  run resolveZoneProcessingOrder
+  assert_success
+  refute_output --partial "did not issue"
+}
+
+# The observed failure, end to end through the two functions that decide it: a deploy-triggered
+# run (renewals `none`, onboarding unlimited) must onboard a zone whose slot holds a placeholder.
+@test "a placeholder-seeded zone draws on the onboarding budget, so renewals 'none' does not defer it" {
+  export CERT_MAX_RENEWALS_PER_RUN="none"
+  source "${WARDEN_SH}"
+  loadConfig
+  publicZonesJson='[{"name":"old.example.test"},{"name":"new.example.test"}]'
+  cat >"${BATS_TEST_TMPDIR}/certlist.json" <<'JSON'
+[
+  {"name":"le-cert-staging-old-example-test-pfx","nbf":"2026-08-01T00:00:00+00:00","exp":"2026-10-30T00:00:00+00:00","issuedBy":"https://acme-staging-v02.api.letsencrypt.org/directory"},
+  {"name":"le-cert-staging-new-example-test-pfx","nbf":"2026-09-01T00:00:00+00:00","exp":"2027-09-01T00:00:00+00:00"}
+]
+JSON
+  stub_az_cert_list
+  resolveZoneProcessingOrder
+
+  run zoneBudgetFor "old.example.test"
+  assert_output "renewal none 0 0"
+  run zoneBudgetFor "new.example.test"
+  assert_output "onboarding unlimited 0 0"
+}
+
+# Classification reads the tag that the import writes. The two must be the same name, or every
+# certificate the warden issues would read as a placeholder on the next run.
+@test "loadConfig: every imported certificate is stamped with the tag classification reads" {
+  source "${WARDEN_SH}"
+  loadConfig
+  [ "${wardenIssuedTagName}" = "IssuedBy" ] # contract: docs/contracts.md §3
+  run printf '%s\n' "${kvCertSecretTags[@]}"
+  assert_line "${wardenIssuedTagName}=${letsencryptServer}"
 }
 
 @test "the deferred action is part of the shipped metrics contract" {
@@ -746,8 +824,10 @@ deferred_record() {
 }
 
 # --- run pacing: which budget a zone draws on -------------------------------------------------
-# A zone's class is "does the vault already hold a certificate for it". That is what keeps a
-# renewal wave from holding up a first issuance: the two classes never share an allowance.
+# A zone's class is "has the warden already issued a certificate for it". That is what keeps a
+# renewal wave from holding up a first issuance: the two classes never share an allowance. (Which
+# zones count as issued is resolveZoneProcessingOrder's call, tested above; these tests set its
+# output directly.)
 
 @test "zoneBudgetFor sends certified zones to the renewal budget and the rest to onboarding" {
   export CERT_MAX_RENEWALS_PER_RUN="3"

@@ -273,8 +273,8 @@ environment is one of the ways a fleet ends up in a single wave to begin with.
 
 ```yaml
 with:
-  max-renewals-per-run: 9              # zones that already hold a certificate
-  max-new-issuance-per-run: unlimited  # zones that do not (the default)
+  max-renewals-per-run: 9              # zones the warden has issued a certificate for
+  max-new-issuance-per-run: unlimited  # zones it has not, placeholder or not (the default)
 ```
 
 Each budget takes **`none`**, **`unlimited`** (the default, also when unset) or a **positive
@@ -286,7 +286,7 @@ They are deliberately **separate allowances**, not one pool:
 
 | | `max-renewals-per-run` | `max-new-issuance-per-run` |
 |---|---|---|
-| Applies to | zones the vault holds a certificate for | zones with none yet |
+| Applies to | zones the warden has issued a certificate for | zones it has not — a seeded placeholder counts as none |
 | Records | `renewed`, `forced` | `issued` |
 | Cost each | **~5 min** | **~1–2 min** |
 | Late means | a certificate ages toward expiry | a deploy is waiting |
@@ -356,6 +356,10 @@ A suppressed run is cheap — onboarding skips lego's pre-renewal sleep — and 
 step summary says renewals were suppressed by design, and the zones it held back are still
 recorded with their real validity window, so the monitor keeps watching them age. If you ever
 suppressed renewals on *every* trigger by mistake, `min_lifetime_fraction` would sink and alert.
+
+This holds for a zone whose slot you seeded with a **placeholder**, too: the warden only counts a
+certificate as renewal work once it has issued it (the `IssuedBy` tag, [contracts.md](contracts.md)
+§3), so the deploy-triggered run issues the new zone rather than deferring it to the next cron.
 
 ### Sizing the renewal cap
 

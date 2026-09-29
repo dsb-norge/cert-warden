@@ -34,7 +34,7 @@ inputs:
     default: "false"
   max-renewals-per-run:
     description: >-
-      How many certificates this run may RENEW or force — zones the Key Vault already holds a
+      How many certificates this run may RENEW or force — zones Cert Warden has already issued a
       certificate for. `none`, `unlimited` (default) or a positive integer. Anything beyond the
       budget is recorded `deferred` and left for the next run, most-urgent-first; the force inputs
       are subject to it too. `none` lets a caller keep renewals off an ad-hoc trigger and on its
@@ -45,7 +45,8 @@ inputs:
     default: "unlimited"
   max-new-issuance-per-run:
     description: >-
-      The same, for FIRST certificates — zones with no certificate yet. A separate budget from
+      The same, for FIRST certificates — zones Cert Warden has not issued for yet, including a
+      zone holding only a seeded placeholder. A separate budget from
       max-renewals-per-run, so a renewal wave never holds up onboarding (a first issuance is also
       ~3-5x cheaper: lego's pre-renewal random sleep does not apply). `none`, `unlimited`
       (default) or a positive integer. Set a number to pace a bulk first issuance.

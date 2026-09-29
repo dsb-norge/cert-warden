@@ -74,7 +74,7 @@ on:
         # ambiguous — the two readings ("zero" vs "no cap") fail in opposite directions, and the
         # wrong one silently stops renewal. Same convention as reusable-monitor.yml's thresholds.
         description: >-
-          How many certificates one run may RENEW or force, i.e. zones already holding one:
+          How many certificates one run may RENEW or force, i.e. zones Cert Warden has issued for:
           `none`, `unlimited` (default) or a positive integer. The rest are recorded `deferred`
           for the next run. Does not limit first issuance. See docs/reference-usage.md.
         type: string
@@ -82,8 +82,9 @@ on:
         default: "unlimited"
       max-new-issuance-per-run:
         description: >-
-          The same for FIRST certificates, i.e. zones with none yet. A separate budget, so a
-          renewal wave never holds up onboarding.
+          The same for FIRST certificates, i.e. zones Cert Warden has not issued for yet (a
+          seeded placeholder counts as none). A separate budget, so a renewal wave never holds up
+          onboarding.
         type: string
         required: false
         default: "unlimited"

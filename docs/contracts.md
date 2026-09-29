@@ -25,8 +25,8 @@ them as-is.
 | `LE_ENVIRONMENT_NAME` | no (`staging`) | `staging` or `production` |
 | `CERT_FORCE_ALL_NEW` | no (`false`) | Force new certs for all zones |
 | `CERT_FORCE_RENEWAL` | no (`false`) | Force renewal of existing certs |
-| `CERT_MAX_RENEWALS_PER_RUN` | no (`unlimited`) | Renewals/forces per run — zones the vault already holds a certificate for. `none`, `unlimited` or a positive integer; **`0` is rejected**. See [pacing](reference-usage.md#pacing-a-large-fleet) |
-| `CERT_MAX_NEW_ISSUANCE_PER_RUN` | no (`unlimited`) | The same for first issuances — zones with no certificate yet. A **separate** budget |
+| `CERT_MAX_RENEWALS_PER_RUN` | no (`unlimited`) | Renewals/forces per run — zones the warden has already issued a certificate for. `none`, `unlimited` or a positive integer; **`0` is rejected**. See [pacing](reference-usage.md#pacing-a-large-fleet) |
+| `CERT_MAX_NEW_ISSUANCE_PER_RUN` | no (`unlimited`) | The same for first issuances — zones the warden has not issued for yet, placeholder or not. A **separate** budget |
 | `CERT_RUNS_PER_DAY` | no (`2`) | The caller's warden cadence; only feeds the renewal cap's sizing guard |
 | `CERT_MONITOR_WARN_THRESHOLD` | no (`0.30`) | Mirror of the monitor's `WARN_THRESHOLD`; only feeds the same guard |
 | `CERT_METRICS_OUTPUT_FILE` | no | Where the metrics artifact is written |
@@ -43,8 +43,9 @@ rejected for the same reason: `-1` conventionally means "no limit" elsewhere, th
 anyone would intend here.
 
 **The two budgets are independent, and a zone's class follows the vault, not the recorded
-action.** A zone the vault holds a certificate for draws on `CERT_MAX_RENEWALS_PER_RUN`; a zone it
-does not draws on `CERT_MAX_NEW_ISSUANCE_PER_RUN`. So a SAN-drift re-issue records `issued` but
+action.** A zone whose slot holds a certificate *the warden issued* — one carrying its `IssuedBy`
+tag (§3) — draws on `CERT_MAX_RENEWALS_PER_RUN`; any other zone draws on
+`CERT_MAX_NEW_ISSUANCE_PER_RUN`, including one whose slot holds only a consumer-seeded placeholder. So a SAN-drift re-issue records `issued` but
 spends renewal budget — correct, because it is maintenance of a zone already in service. If the
 Key Vault pre-pass fails there is nothing to classify on, and both budgets collapse onto the
 **smallest** cap that is set: conservative by design, since the alternative is letting a failed
@@ -154,6 +155,31 @@ deployment environment — the name is identical in every consumer environment.
 
 The sweeper's default target (`le-cert-staging-…`, `letsencrypt-staging-account-…`) and
 protected (`letsencrypt-production-account-…`, `cert-…`) prefixes are derived from this scheme.
+
+### The `IssuedBy` tag: which certificates are the warden's
+
+Every certificate the warden imports is tagged `IssuedBy=<ACME directory URL>`, next to the
+caller-supplied `ApplicationName`, `CreatedBy` and `Description` (an import **replaces** an
+object's tags, so these are the only ones it keeps). The tag *name* is contract: it is how the
+warden tells a certificate it issued from anything else at the same object name, and so which
+budget a zone draws on (§1). The value is informational.
+
+That distinction exists for **placeholders**. A consumer may seed a self-signed certificate at a
+zone's slot name so that, for example, Application Gateway can reference the secret before the
+first run ([consumer-prerequisites.md](consumer-prerequisites.md#key-vault-expectations)). Without
+the tag, that object reads as a certificate in service, and the zone as renewal work: a run with
+`max-renewals-per-run: none` defers it, and a capped run makes it wait behind every due renewal.
+
+So, for anyone creating objects at a slot name:
+
+- **Never put `IssuedBy` on a placeholder.** It would be classed as a renewal until the warden
+  replaces it — the behaviour this tag exists to prevent.
+- **Nothing else is needed.** The warden's first import replaces the placeholder's tags with its
+  own, so the zone becomes a renewal exactly when it gets its first real certificate. If your IaC
+  manages the object, ignore changes to its tags (and certificate and policy), or it will try to
+  revert the import.
+- Renaming the tag would turn every zone in every consumer's vault into a first issuance at once,
+  so treat it like an object name: a breaking change.
 
 ## 4. The bot notification contract (external)
 

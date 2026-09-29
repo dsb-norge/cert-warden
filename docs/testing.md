@@ -43,9 +43,12 @@ it. When a script grows a new `az` call, the shim fails loudly (`unhandled comma
 extending it is a conscious, reviewed act.
 
 Its `keyvault certificate list` answers the **union** of the two projections its callers ask
-for (the sweeper's `{name, exp}` and the warden's `{name, nbf, exp}`) — the shim ignores
+for (the sweeper's `{name, exp}` and the warden's `{name, nbf, exp, issuedBy}`) — the shim ignores
 `--query`, so a caller adding a field to the projection must add it here too, or read a `null`
-that real `az` would never return.
+that real `az` would never return. `issuedBy` is the one field that is legitimately `null`: a
+placeholder carries no `IssuedBy` tag, and a JMESPath projection of a missing key yields `null`.
+`certificate import` stores its `--tags` on the object, replacing any it had, as Key Vault does —
+which is what lets e2e-16 seed a placeholder and watch the warden's first import claim it.
 
 **No rate limits anywhere in CI**: Pebble explicitly implements none ("It is not presently an
 appropriate tool for testing that your client handles Boulder/Let's Encrypt rate limits

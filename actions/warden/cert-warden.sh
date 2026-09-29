@@ -24,11 +24,12 @@
 #     - CERT_FORCE_ALL_NEW:   If set to "true", forces new certificates for all DNS zones (default: "false")
 #     - CERT_FORCE_RENEWAL:   If set to "true", forces renewal of existing certificates (default: "false")
 #     - CERT_MAX_RENEWALS_PER_RUN: How many certificates this run may renew or force, i.e. zones
-#                             the vault already holds a certificate for. "none", "unlimited"
+#                             the warden has already issued a certificate for. "none", "unlimited"
 #                             (default, also when unset) or a positive integer. Anything beyond
 #                             the budget is recorded "deferred" and left for the next run.
 #                             NOTE "0" is rejected as ambiguous -- write "none" or "unlimited".
-#     - CERT_MAX_NEW_ISSUANCE_PER_RUN: The same, for zones with NO certificate yet (onboarding).
+#     - CERT_MAX_NEW_ISSUANCE_PER_RUN: The same, for zones the warden has NOT issued for yet
+#                             (onboarding) -- including a zone holding only a seeded placeholder.
 #                             Separate budget: a renewal wave never holds up a first issuance,
 #                             and "none" on one class does not affect the other.
 #   Test seams (NOT supported for production use — defaults are production behaviour; see docs/contracts.md):
@@ -91,8 +92,8 @@ function loadConfig() {
   # TWO budgets, because the run has two kinds of work that differ by 3-5x in wall clock and
   # entirely in urgency. Each is `none`, `unlimited` (the default) or a positive integer.
   #
-  #   maxRenewalsPerRun     zones the vault ALREADY holds a certificate for (renewed/forced)
-  #   maxNewIssuancePerRun  zones it does not (first issuance -- "onboarding")
+  #   maxRenewalsPerRun     zones the warden has ALREADY issued a certificate for (renewed/forced)
+  #   maxNewIssuancePerRun  zones it has not (first issuance -- "onboarding"), placeholder or not
   #
   # Why a cap exists at all: ARI schedules renewal relative to ISSUANCE, so a fleet issued
   # together renews together -- and each renewal re-issues it together again. The shape of the
@@ -201,7 +202,7 @@ function loadConfig() {
     "ApplicationName=${CERT_AZ_RESOURCE_TAG_ApplicationName}"
     "CreatedBy=${CERT_AZ_RESOURCE_TAG_CreatedBy}"
     "Description=${CERT_AZ_RESOURCE_TAG_Description}"
-    "IssuedBy=${letsencryptServer}"
+    "${wardenIssuedTagName}=${letsencryptServer}"
   )
 
 }
@@ -250,11 +251,20 @@ declare -a zoneProcessingOrder=()
 declare -A zoneCertNotBefore=()
 declare -A zoneCertNotAfter=()
 
-# Whether the pre-pass could tell renewals from onboarding at all. A zone's class is "does the
-# vault hold a certificate for it", which is exactly what the pre-pass listing answers -- so when
-# that listing fails there is nothing to classify on, and the two budgets collapse into one (see
-# zoneBudgetFor).
+# Whether the pre-pass could tell renewals from onboarding at all. A zone's class is "has the
+# warden issued a certificate for it", which is exactly what the pre-pass listing answers -- so
+# when that listing fails there is nothing to classify on, and the two budgets collapse into one
+# (see zoneBudgetFor).
 zoneClassificationAvailable=false
+
+# The Key Vault tag the warden stamps on every certificate it imports (kvCertSecretTags in
+# loadConfig), and so the thing that tells a certificate the warden issued apart from anything
+# else sitting at the same object name. That matters because consumers are told to seed one:
+# a placeholder at the zone's slot name, so that e.g. Application Gateway can reference the
+# secret before the first run (docs/consumer-prerequisites.md). Part of the Key Vault contract
+# (docs/contracts.md §3) -- classification keys on it, so renaming it would turn every zone in
+# every consumer's vault into a first issuance at once.
+wardenIssuedTagName="IssuedBy"
 
 #endregion Run pacing state
 
@@ -548,6 +558,15 @@ function restoreLegoMetadataFromKeyVault() {
 #    days_to_expiry and lifetime_fraction_remaining REAL on deferred records -- see
 #    recordCertMetric for why a null there would be actively dangerous.
 #
+# "A certificate" here means one the WARDEN issued: an object carrying its wardenIssuedTagName
+# tag. Anything else at the zone's slot name -- in practice a consumer-seeded placeholder -- is
+# treated exactly like no certificate at all, for all three things this function decides: the
+# zone is onboarding (zoneBudgetFor), it sorts last, and a deferred record carries no validity
+# window. Counting the placeholder instead made every newly added zone a renewal: renewals
+# `none` on a deploy-triggered run deferred it to the next cron, and on the cron it took a
+# renewal slot -- after every due renewal, because a placeholder's long validity sorts it last.
+# The tag costs nothing to read: it comes back in this same listing.
+#
 # A failed listing is not fatal: fall back to enumeration order with no validity windows
 # (degraded metrics for one run) rather than refusing to maintain any certificate at all.
 # Arguments:
@@ -572,21 +591,25 @@ function resolveZoneProcessingOrder() {
 
   local _kvCertListJson
   if ! _kvCertListJson="$(az keyvault certificate list --vault-name "${certKvName}" \
-    --query "[].{name:name, nbf:attributes.notBefore, exp:attributes.expires}" -o json)" ||
+    --query "[].{name:name, nbf:attributes.notBefore, exp:attributes.expires, issuedBy:tags.${wardenIssuedTagName}}" -o json)" ||
     ! jq -e 'type == "array"' <<<"${_kvCertListJson}" >/dev/null 2>&1; then
     log-warn "Could not list certificates in KeyVault ${certKvName}: keeping enumeration order, deferred zones will be recorded without a validity window, and the renewal/onboarding budgets collapse into one"
     return 0
   fi
 
   # Key Vault renders expiry as UTC ISO-8601 (2026-11-03T12:00:00+00:00), so sorting the strings
-  # IS sorting chronologically. Zones without a certificate get rank 1 and land at the end.
+  # IS sorting chronologically. Zones without a certificate get rank 1 and land at the end. An
+  # object without the warden's tag is dropped to "no certificate" before any of that (see above);
+  # `seeded` only remembers that one was there, for the log line below.
   local _orderJson
   _orderJson="$(jq -c --argjson zones "${publicZonesJson}" --arg prefix "le-cert-${letsencryptEnvironment}-" '
       (map({key: .name, value: .}) | from_entries) as $byName
       | $zones
       | map(.name as $zone
-            | (($byName[$prefix + ($zone | gsub("\\."; "-")) + "-pfx"]) // {}) as $cert
-            | {zone: $zone, nbf: ($cert.nbf // ""), exp: ($cert.exp // "")})
+            | $byName[$prefix + ($zone | gsub("\\."; "-")) + "-pfx"] as $object
+            | (if ($object.issuedBy // "") != "" then $object else {} end) as $cert
+            | {zone: $zone, nbf: ($cert.nbf // ""), exp: ($cert.exp // ""),
+               seeded: ($object != null and $cert == {})})
       | sort_by((if .exp == "" then 1 else 0 end), .exp)' <<<"${_kvCertListJson}")"
 
   mapfile -t zoneProcessingOrder < <(jq -r '.[].zone' <<<"${_orderJson}")
@@ -599,13 +622,27 @@ function resolveZoneProcessingOrder() {
 
   zoneClassificationAvailable=true
   log-info "  Zone order for this run is most-urgent-first (ascending remaining validity)"
+
+  # Said out loud because it is the one case where the vault and the class disagree: an operator
+  # who can see an object in the portal should not have to work out why it counts as onboarding.
+  local _seededCount
+  _seededCount="$(jq '[.[] | select(.seeded)] | length' <<<"${_orderJson}")"
+  if [ "${_seededCount}" -gt 0 ]; then
+    log-info "  ${_seededCount} zone(s) hold a Key Vault object Cert Warden did not issue (no '${wardenIssuedTagName}' tag, e.g. a seeded placeholder); they count as first issuance"
+  fi
 }
 
 # Which budget does a zone draw on, and how much of it is left?
 #
-# A zone's class is simply whether the vault already holds a certificate for it: if it does, this
-# run can only renew (or force) it; if it does not, this run must issue a first certificate. That
-# is exactly what the pre-pass listing answers, so classification costs nothing extra.
+# A zone's class is simply whether the warden has already issued a certificate for it: if it has,
+# this run can only renew (or force) it; if it has not, this run must issue a first certificate.
+# That is exactly what the pre-pass listing answers, so classification costs nothing extra.
+#
+# "Issued by the warden", NOT "the vault holds an object at the zone's slot name". Consumers seed
+# a placeholder at exactly that name (docs/consumer-prerequisites.md), so the object test called
+# every new zone a renewal -- and `max-renewals-per-run: none` on a deploy-triggered run, the very
+# shape that is meant to onboard, deferred it. The pre-pass therefore only counts an object that
+# carries the warden's own tag (see resolveZoneProcessingOrder).
 #
 # Note the class follows the VAULT, not the action that ends up recorded. A zone whose A records
 # drifted is re-issued from scratch and records `issued`, but it draws on the renewal budget --

@@ -128,7 +128,12 @@ gh api /repos/<your-org>/<your-repo> --jq .id   # <repo-id>
   the retention window).
 - Seed a **placeholder** certificate at the production slot name
   (`le-cert-production-<zone-dashed>-pfx`, see [contracts.md](contracts.md) §3) if a consumer
-  like Application Gateway must reference the secret id before the warden's first run.
+  like Application Gateway must reference the secret id before the warden's first run. The
+  warden counts a zone as a **first issuance** until it has issued a certificate there itself —
+  it recognises its own by the `IssuedBy` tag — so a placeholder draws on
+  `max-new-issuance-per-run`, not the renewal budget. Don't copy the warden's tags onto the
+  placeholder, and have your IaC ignore changes to the object's certificate, policy and tags
+  once it exists (the first import rewrites all three).
 
 ## Runner and network
 

@@ -44,6 +44,7 @@
 #   - Read all public DNS zones in the specified resource group
 #   - For each zone, check if it is publicly delegated by comparing configured NS records with public NS records
 #   - For each publicly delegated zone, check if a certificate already exists in the specified KeyVault
+#   - If the object there was not issued by Cert Warden (no IssuedBy tag, e.g. a seeded placeholder), request a new certificate
 #   - If a certificate exists, check if it matches the zone name and A records
 #     - If it matches, evaluate if it needs renewal based on expiry and configured settings
 #     - If it does not match, request a new certificate
@@ -1295,8 +1296,12 @@ function main() {
           log-info "  Ignoring existing certificate as 'forceNew' is set to '${forceNew}'"
           renewing=false
         else
-          # key vault has the SAN values as well as the domain/subject for the existing certificate
-          existingCertMetaJson=$(az keyvault certificate show --vault-name "${certKvName}" --name "${certKvPfxSecretName}" --query policy.x509CertificateProperties -o json)
+          # key vault has the SAN values as well as the domain/subject for the existing certificate,
+          # and its tags say whether the warden issued it -- one call answers both
+          existingCertJson=$(az keyvault certificate show --vault-name "${certKvName}" --name "${certKvPfxSecretName}" \
+            --query "{x509: policy.x509CertificateProperties, issuedBy: tags.${wardenIssuedTagName}}" -o json)
+          existingCertMetaJson=$(echo "${existingCertJson}" | jq .x509)
+          existingCertIssuedBy=$(echo "${existingCertJson}" | jq -r '.issuedBy // empty')
 
           # all domains in certificates SAN as json array
           existingCertSanValuesJsonArrayArray=$(echo "${existingCertMetaJson}" | jq -r .subjectAlternativeNames.dnsNames)
@@ -1309,7 +1314,20 @@ function main() {
           # CN=*.zone), so a CN==zone check yields false negatives and would re-issue a new cert
           # on every run (and risk the duplicate-certificate rate limit). The apex is always
           # present in the SAN for a correctly-issued cert.
-          if ! echo "${existingCertSanValuesJsonArrayArray}" | jq -e --arg z "${zoneName}" 'index($z) != null' &>/dev/null; then
+          #
+          # Checked first, though: whether the warden issued this object at all. Anything without
+          # its tag is in practice a consumer-seeded placeholder, and one that covers the zone
+          # (the natural way to seed it, so the listener answers SNI) passes both SAN checks
+          # below. It would then take the renewal path, and be replaced only because lego finds
+          # no metadata for it and orders afresh -- recorded as `renewed`, for what is the zone's
+          # first issuance. Request that first certificate directly instead: same ACME outcome,
+          # recorded `issued`, no placeholder download. This must not rely on the pre-pass's
+          # classification, which an uncapped run never computes.
+          if [ -z "${existingCertIssuedBy}" ]; then
+            log-info "  The object in this slot was not issued by Cert Warden (no '${wardenIssuedTagName}' tag), e.g. a seeded placeholder"
+            log-info "  A new certificate will be requested to replace it"
+            renewing=false
+          elif ! echo "${existingCertSanValuesJsonArrayArray}" | jq -e --arg z "${zoneName}" 'index($z) != null' &>/dev/null; then
             # the apex zone is not in the existing cert's SAN -> request a new certificate
             log-warn "Existing certificate does not cover the DNS zone apex in its SAN"
             log-warn "  SAN is '$(echo "${existingCertSanValuesJsonArrayArray}" | jq -c .)' vs. DNS zone name '${zoneName}'"

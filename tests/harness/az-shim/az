@@ -123,8 +123,10 @@ case "${cmd[*]}" in
   "keyvault certificate show")
     f="${state}/certs/${name:?}.json"
     [[ -f "${f}" ]] || fail "CertificateNotFound: ${name}"
-    # --query policy.x509CertificateProperties -o json
-    jq '{subject: ("CN=" + .cn), subjectAlternativeNames: {dnsNames: .sans, emails: [], upns: []}, validityInMonths: null}' "${f}"
+    # --query "{x509: policy.x509CertificateProperties, issuedBy: tags.IssuedBy}" -o json
+    # A missing tag projects to null, as with `certificate list`.
+    jq '{x509: {subject: ("CN=" + .cn), subjectAlternativeNames: {dnsNames: .sans, emails: [], upns: []}, validityInMonths: null},
+         issuedBy: (.tags.IssuedBy // null)}' "${f}"
     ;;
 
   "keyvault certificate list")

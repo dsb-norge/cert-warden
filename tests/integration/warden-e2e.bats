@@ -614,16 +614,23 @@ JSON
   rm -f "${CW_STATE}/certs/${kv}.json" "${CW_STATE}/secrets/${kv}" "${CW_STATE}/secrets/${kv}-meta"
   seed_placeholder "zone2.cw-test.internal" "${kv}"
 
+  : >"${CW_STATE}/calls.log"
   CERT_MAX_RENEWALS_PER_RUN=none run_warden
   assert_success
   assert_output --partial "renewals=none"
   assert_output --partial "1 zone(s) hold a Key Vault object Cert Warden did not issue"
   refute_output --partial "deferring zone2.cw-test.internal"
+  assert_output --partial "not issued by Cert Warden"
 
   run jq -r '.[] | select(.zone == "cw-test.internal") | .action' "${METRICS_OUT}"
   assert_output "deferred"
+  # `issued`, not `renewed`: it is the zone's first certificate, whatever sat in the slot before.
   run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .action' "${METRICS_OUT}"
-  refute_output "deferred"
+  assert_output "issued"
+  # ... and replacing the placeholder never needed it: its backing secret was not downloaded. The
+  # existence check reads the same secret without `--query value`, so only a download matches.
+  run grep -c -- "secret show --name ${kv} --vault-name [^ ]* --query value" "${CW_STATE}/calls.log"
+  assert_output "0"
 
   # The slot now holds the CA's certificate (the shim verified its chain on import), stamped as
   # the warden's -- the import replaced the placeholder's tags.

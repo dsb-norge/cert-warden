@@ -136,6 +136,8 @@ seed_placeholder() {
 @test "e2e-1 first run: real ACME issuance lands verified certs in the vault" {
   run_warden
   assert_success
+  # First issuances are counted in the summary line, not left as managed minus everything else:
+  assert_output --partial "failed=0 issued=2 renewed=0"
 
   # Both delegated zones issued; the non-delegated one recorded and skipped:
   run jq -r 'map({(.zone): .action}) | add | .["cw-test.internal"], .["zone2.cw-test.internal"], .["not-delegated.internal"]' "${METRICS_OUT}"
@@ -296,6 +298,8 @@ JSON
   assert_output "1"
   run grep -c 'warden: ' "${GITHUB_STEP_SUMMARY}"
   assert_output "0"
+  run grep -c 'issued: \*\*1\*\* · renewed: \*\*0\*\*' "${GITHUB_STEP_SUMMARY}"
+  assert_output "1"
 
   # force-renewal: matching cert + --renew-force => renewed now (ARI bypassed), action=forced.
   CERT_FORCE_RENEWAL=true run_warden

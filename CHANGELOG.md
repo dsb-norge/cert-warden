@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/dsb-norge/cert-warden/compare/v1.3.1...v1.4.0) (2026-09-30)
+
+
+### Features
+
+* **warden:** report issued certificates in the run summary ([42f1fec](https://github.com/dsb-norge/cert-warden/commit/42f1fec02fb847eff9b9ea24cefbc8eaa1152be4))
+
 ## [1.3.1](https://github.com/dsb-norge/cert-warden/compare/v1.3.0...v1.3.1) (2026-09-29)
 
 

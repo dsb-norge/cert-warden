@@ -505,3 +505,38 @@ run_fact_for_age() { # <age-hours> -> the `Cert Warden run` fact value the card 
   # ... and it is NOT counted as a renewal backlog.
   assert_output --partial "still_due=0"
 }
+
+card_facts() { # the FactSet of the payload DRY_RUN printed to ${BATS_TEST_TMPDIR}/out.txt
+  sed -n '/^{/,$p' "${BATS_TEST_TMPDIR}/out.txt" |
+    jq -r '.message.body[] | select(.type == "FactSet") | .facts[] | "\(.title)=\(.value)"'
+}
+
+@test "first issuances are counted, and reach the card only when there are some" {
+  # Without a count of its own, a first issuance could only be read as managed minus the rest.
+  drain_fixture 2 1 # breaching, so a card is built; nothing issued
+  bash "${MONITOR_SH}" >"${BATS_TEST_TMPDIR}/out.txt" 2>&1
+  run grep -c 'failed=0 issued=0 renewed=1' "${BATS_TEST_TMPDIR}/out.txt"
+  assert_output "1"
+  run grep -c '| Issued | 0 |' "${GITHUB_STEP_SUMMARY}"
+  assert_output "1"
+  run card_facts
+  refute_output --partial "Issued="
+
+  write_metrics_fixture "${METRICS}" \
+    '{"zone":"a.example.test","kv_cert_name":"le-cert-production-a-pfx","action":"issued","lifetime_fraction_remaining":0.99,"days_to_expiry":89,"error":"","deferred_reason":""}' \
+    '{"zone":"b.example.test","kv_cert_name":"le-cert-production-b-pfx","action":"deferred","lifetime_fraction_remaining":null,"days_to_expiry":null,"error":"","deferred_reason":"budget-spent"}'
+  export GITHUB_OUTPUT="${BATS_TEST_TMPDIR}/gh_output"
+  : >"${GITHUB_OUTPUT}"
+  FORCE_NOTIFY=true bash "${MONITOR_SH}" >"${BATS_TEST_TMPDIR}/out.txt" 2>&1
+  run grep -c 'failed=0 issued=1 renewed=0' "${BATS_TEST_TMPDIR}/out.txt"
+  assert_output "1"
+  run grep -c '| Issued | 1 |' "${GITHUB_STEP_SUMMARY}"
+  assert_output "1"
+  run grep -c '^issued-count=1$' "${GITHUB_OUTPUT}"
+  assert_output "1"
+  # The onboarding pair closes the card, the issued half first.
+  card_facts >"${BATS_TEST_TMPDIR}/facts.txt"
+  run tail -n 2 "${BATS_TEST_TMPDIR}/facts.txt"
+  assert_output "Issued=1
+Awaiting first issuance=1"
+}

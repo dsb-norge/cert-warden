@@ -119,6 +119,7 @@ failedZones=""
 # multi-day drain produces a run of near-identical cards unless the moving numbers are on them.
 renewedCount=0
 stillDueCount=0
+issuedCount=0
 awaitingIssuanceCount=0
 renewalsSuppressed=false
 
@@ -150,6 +151,10 @@ elif [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]] && jq empty "${METRICS
   # card and the run annotation can never disagree about the size of a wave.
   renewedCount=$(jq "${CW_JQ_LIB} [.[] | select(cw_renewed)] | length" "${METRICS_FILE}")
   stillDueCount=$(jq "${CW_JQ_LIB} [.[] | select(cw_deferred and cw_holds_cert and cw_is_due)] | length" "${METRICS_FILE}")
+  # The onboarding pair, beside the drain pair: first certificates the run issued, and zones still
+  # waiting for one. Without `issued` a first issuance can only be read as the gap between managed
+  # and everything else. `cw_issued` is the warden's definition too, so its summary line agrees.
+  issuedCount=$(jq "${CW_JQ_LIB} [.[] | select(cw_issued)] | length" "${METRICS_FILE}")
   awaitingIssuanceCount=$(jq "${CW_JQ_LIB} [.[] | select(cw_deferred and (cw_holds_cert | not))] | length" "${METRICS_FILE}")
   # A run told to renew nothing (max-renewals-per-run: none) renews nothing BY DESIGN. Without
   # this the card would call every such run stalled -- and a caller keeping renewals off an ad-hoc
@@ -158,7 +163,7 @@ elif [[ -n "${METRICS_FILE:-}" && -s "${METRICS_FILE}" ]] && jq empty "${METRICS
     renewalsSuppressed=true
   fi
 
-  echo "${_action_name}: managed=${managedCount} failed=${failedCount} renewed=${renewedCount} still_due=${stillDueCount} awaiting_issuance=${awaitingIssuanceCount} renewals_suppressed=${renewalsSuppressed} min_lifetime_fraction=${minLifetimeFraction} worst_zone=${worstZone} worst_days=${worstDays}"
+  echo "${_action_name}: managed=${managedCount} failed=${failedCount} issued=${issuedCount} renewed=${renewedCount} still_due=${stillDueCount} awaiting_issuance=${awaitingIssuanceCount} renewals_suppressed=${renewalsSuppressed} min_lifetime_fraction=${minLifetimeFraction} worst_zone=${worstZone} worst_days=${worstDays}"
   end-group
 else
   echo "${_action_name}: metrics file '${METRICS_FILE:-<unset>}' missing, empty or unparsable."
@@ -271,6 +276,7 @@ if [[ "${severity}" == "UNKNOWN" ]]; then
   dspFailed="not evaluated"
   dspMinLifetime="not evaluated"
   dspWorst="not evaluated"
+  dspIssued="not evaluated"
   dspRenewed="not evaluated"
   dspStillDue="not evaluated"
 else
@@ -278,6 +284,7 @@ else
   dspFailed="${failedCount}${failedZones:+ (${failedZones})}"
   dspMinLifetime="${minLifetimeFraction}"
   dspWorst="${worstZone:-n/a}${worstDays:+ (~${worstDays}d left)}"
+  dspIssued="${issuedCount}"
   dspRenewed="${renewedCount}"
   dspStillDue="${stillDueCount}${renewalsSuppressed:+}"
   [[ "${renewalsSuppressed}" == "true" ]] && dspStillDue="${stillDueCount} (renewals suppressed this run)"
@@ -290,6 +297,7 @@ fi
   echo "| --- | --- |"
   echo "| Managed certs | ${dspManaged} |"
   echo "| Failed | ${dspFailed} |"
+  echo "| Issued | ${dspIssued} |"
   echo "| Renewed | ${dspRenewed} |"
   echo "| Still due | ${dspStillDue} |"
   echo "| min_lifetime_fraction | ${dspMinLifetime} |"
@@ -321,6 +329,7 @@ emitOutputs() {
     set-output "managed-count" ""
     set-output "failed-count" ""
     set-output "worst-zone" ""
+    set-output "issued-count" ""
     set-output "renewed-count" ""
     set-output "still-due-count" ""
     set-output "awaiting-issuance-count" ""
@@ -330,6 +339,7 @@ emitOutputs() {
     set-output "managed-count" "${managedCount}"
     set-output "failed-count" "${failedCount}"
     set-output "worst-zone" "${worstZone}"
+    set-output "issued-count" "${issuedCount}"
     set-output "renewed-count" "${renewedCount}"
     set-output "still-due-count" "${stillDueCount}"
     set-output "awaiting-issuance-count" "${awaitingIssuanceCount}"
@@ -380,14 +390,16 @@ reasonsText=$(printf '%s\n' "${reasons[@]:-no issues}" | sed 's/^/- /')
 # the calendar rather than with progress. `Renewed` is deliberately NOT "renewed this run": a
 # scheduled monitor re-reports an older warden run, and a reader binds "this" to "now" and
 # concludes certificates were renewed minutes ago. The `Cert Warden run` fact carries the age
-# instead, so the count and its timestamp sit on the same card. The last two facts appear only
-# when they have something to say, so an ordinary card stays short.
+# instead, so the count and its timestamp sit on the same card. The onboarding pair -- `Issued` and
+# `Awaiting first issuance` -- appears only when it has something to say, so an ordinary card
+# stays short.
 factsJson=$(jq -n \
   --arg env "${ENV_NAME}" \
   --arg managed "${managedCount}" \
   --arg failed "${failedCount}" \
   --arg renewed "${renewedCount}" \
   --arg stilldue "${stillDueCount}" \
+  --arg issued "${issuedCount}" \
   --arg awaiting "${awaitingIssuanceCount}" \
   --arg minlf "${minLifetimeFraction}" \
   --arg worst "${worstZone:-n/a}${worstDays:+ (~${worstDays}d)}" \
@@ -403,6 +415,7 @@ factsJson=$(jq -n \
      {title: "Worst zone", value: $worst},
      {title: "Cert Warden run", value: $run}
    ]
+   + (if ($issued | tonumber) > 0 then [{title: "Issued", value: $issued}] else [] end)
    + (if ($awaiting | tonumber) > 0 then [{title: "Awaiting first issuance", value: $awaiting}] else [] end)')
 
 card=$(jq -n \

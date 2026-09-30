@@ -442,7 +442,7 @@ So the numbers that *move* are reported alongside it, in three places:
 | Where | What it says |
 |---|---|
 | Warden step summary | `renewed: 3` and `deferred: 38 — 16 renewal(s) still due, 22 not yet due, 0 awaiting first issuance` |
-| Monitor step summary + Teams card | `Renewed: 3`, `Still due: 16`, and `Awaiting first issuance` when there is any |
+| Monitor step summary + Teams card | `Renewed: 3`, `Still due: 16`, and `Issued` / `Awaiting first issuance` on the card when there are any |
 | Monitor reason line | `… — 16 still due, 3 renewed this run; draining` |
 
 **The card says which run it is describing.** `Cert Warden run` carries the run's age next to its

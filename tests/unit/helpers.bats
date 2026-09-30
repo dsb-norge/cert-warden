@@ -111,12 +111,13 @@ due_of() { # <fraction> <days_to_expiry> -> true|false
   [ "$(due_of 0.5 null)" = false ]
 }
 
-@test "cw_deferred, cw_renewed and cw_holds_cert classify the actions" {
+@test "cw_deferred, cw_renewed, cw_issued and cw_holds_cert classify the actions" {
   source "${HELPERS_BASH}"
-  classify() { jq -r "${CW_JQ_LIB} .[0] | \"\(cw_deferred) \(cw_renewed) \(cw_holds_cert)\"" <<<"[${1}]"; }
-  [ "$(classify '{"action":"deferred","lifetime_fraction_remaining":0.3}')" = "true false true" ]
-  [ "$(classify '{"action":"deferred","lifetime_fraction_remaining":null}')" = "true false false" ]
-  [ "$(classify '{"action":"renewed","lifetime_fraction_remaining":0.9}')" = "false true true" ]
-  [ "$(classify '{"action":"forced","lifetime_fraction_remaining":0.9}')" = "false true true" ]
-  [ "$(classify '{"action":"issued","lifetime_fraction_remaining":0.9}')" = "false false true" ]
+  classify() { jq -r "${CW_JQ_LIB} .[0] | \"\(cw_deferred) \(cw_renewed) \(cw_issued) \(cw_holds_cert)\"" <<<"[${1}]"; }
+  [ "$(classify '{"action":"deferred","lifetime_fraction_remaining":0.3}')" = "true false false true" ]
+  [ "$(classify '{"action":"deferred","lifetime_fraction_remaining":null}')" = "true false false false" ]
+  [ "$(classify '{"action":"renewed","lifetime_fraction_remaining":0.9}')" = "false true false true" ]
+  [ "$(classify '{"action":"forced","lifetime_fraction_remaining":0.9}')" = "false true false true" ]
+  [ "$(classify '{"action":"issued","lifetime_fraction_remaining":0.9}')" = "false false true true" ]
+  [ "$(classify '{"action":"skipped","lifetime_fraction_remaining":0.9}')" = "false false false true" ]
 }

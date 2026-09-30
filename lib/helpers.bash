@@ -74,6 +74,7 @@ CW_JQ_LIB='
     end;
   def cw_deferred: .action == "deferred";
   def cw_renewed: .action == "renewed" or .action == "forced";
+  def cw_issued: .action == "issued";
   def cw_holds_cert: (.lifetime_fraction_remaining // null) != null;
 '
 

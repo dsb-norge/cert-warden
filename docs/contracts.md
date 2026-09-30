@@ -54,9 +54,9 @@ listing produce an unbounded run.
 ### monitor (`actions/monitor/monitor.sh`)
 
 Outputs include the drain pair — `renewed-count` and `still-due-count` — alongside
-`severity`, `min-lifetime-fraction`, `managed-count`, `failed-count`, `worst-zone`,
-`awaiting-issuance-count`, `renewals-suppressed`, `reasons-json`, `notified` and
-`notify-http-status`. All are emitted **empty** under `UNKNOWN`.
+`severity`, `min-lifetime-fraction`, `managed-count`, `failed-count`, `worst-zone`, the
+onboarding pair `issued-count` and `awaiting-issuance-count`, `renewals-suppressed`,
+`reasons-json`, `notified` and `notify-http-status`. All are emitted **empty** under `UNKNOWN`.
 
 `METRICS_FILE`, `ENV_NAME`, `WARN_THRESHOLD` (0.30), `PAGE_THRESHOLD` (0.15),
 `LIVENESS_WINDOW_HOURS` (36), `CERT_WARDEN_CONCLUSION`, `CERT_WARDEN_RUN_URL`,

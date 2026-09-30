@@ -1537,7 +1537,7 @@ function main() {
   # the gap between managed and everything else, and the deferred group's `new=` (zones still
   # WAITING for one) reads like its opposite. The action, not the class: a drifted zone re-issued
   # from scratch, or a force-all-new run, lands here too -- see zoneBudgetFor.
-  metricsIssued=$(jq '[.[] | select(.action == "issued")] | length' "${certMetricsOutputFile}")
+  metricsIssued=$(jq "${CW_JQ_LIB} [.[] | select(cw_issued)] | length" "${certMetricsOutputFile}")
   metricsMinFraction=$(jq '[.[] | .lifetime_fraction_remaining // empty] | if length > 0 then min else null end' "${certMetricsOutputFile}")
   log-info "  Summary: zones=${metricsTotal} managed=${metricsManaged} failed=${metricsFailed} issued=${metricsIssued} renewed=${metricsRenewed} deferred=${metricsDeferred} (renewals=${metricsDeferredRenewals} of which ${metricsStillDue} still due, new=${metricsDeferredNew}) min_lifetime_fraction=${metricsMinFraction}"
   if [ "${renewalBudgetMode}" = none ]; then

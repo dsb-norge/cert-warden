@@ -79,6 +79,14 @@ output. Consumers that branch on `severity` must treat an unrecognised value as 
 `MAX_DELETIONS` (120), `TARGET_CERT_PREFIXES`, `TARGET_SECRET_PREFIXES`,
 `PROTECTED_PREFIXES`. A protected prefix always wins.
 
+It deletes:
+
+- certificates and secrets matching the target prefixes;
+- certificates that have expired (unless `SWEEP_EXPIRED=false`);
+- lego metadata secrets (`le-cert-*-pfx-meta`, [§3](#3-the-key-vault-naming-scheme)) whose
+  certificate is not in the vault or is deleted in the same run. This rule has no input: the
+  `-meta` secret exists only for its certificate.
+
 ### Test seams (`CW_*` — NOT supported for production use)
 
 Defaults are production behaviour; the integration harness overrides them
@@ -155,6 +163,8 @@ deployment environment — the name is identical in every consumer environment.
 
 The sweeper's default target (`le-cert-staging-…`, `letsencrypt-staging-account-…`) and
 protected (`letsencrypt-production-account-…`, `cert-…`) prefixes are derived from this scheme.
+So is the way it pairs a `-meta` secret with its certificate: the certificate's name is the
+secret's name without `-meta`.
 
 ### The `IssuedBy` tag: which certificates are the warden's
 

@@ -655,3 +655,48 @@ JSON
     | .action == "deferred" and .lifetime_fraction_remaining != null' "${METRICS_OUT}"
   assert_success
 }
+
+@test "e2e-17 a removed zone's -meta is swept, and the zone can come back while it is soft-deleted" {
+  # A consumer drops zone2 from its zones. Its IaC destroys and purges the certificate, and the
+  # -meta the warden wrote beside it is left behind -- nothing but the sweeper ever deletes one.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[ {"name": "cw-test.internal", "nameServers": ["ns1.cw-test.internal."]} ]
+JSON
+  kv="le-cert-staging-zone2-cw-test-internal-pfx"
+  rm -f "${CW_STATE}/certs/${kv}.json" "${CW_STATE}/secrets/${kv}"
+  [ -f "${CW_STATE}/secrets/${kv}-meta" ]
+
+  # Prefixes that match nothing here, so the staging prefix rule is not what deletes it: this is
+  # the rule a production vault relies on.
+  KV_NAME="kv-l2" LOG_ONLY="false" TARGET_CERT_PREFIXES="none-" TARGET_SECRET_PREFIXES="none-" \
+    run bash "${SWEEPER_SH}"
+  assert_success
+  assert_line --partial "DELETE  : ${kv}-meta [orphan-meta]"
+  assert_line --partial "keep    : le-cert-staging-cw-test-internal-pfx-meta"
+  [ ! -f "${CW_STATE}/secrets/${kv}-meta" ]
+  [ -f "${CW_STATE}/deleted-secrets/${kv}-meta" ]
+
+  # zone2 comes back inside the retention period, so the soft-deleted -meta still holds the name
+  # its first issuance writes to.
+  cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
+[
+  {"name": "cw-test.internal",      "nameServers": ["ns1.cw-test.internal."]},
+  {"name": "zone2.cw-test.internal", "nameServers": ["ns1.zone2.cw-test.internal."]}
+]
+JSON
+  run_warden
+  assert_success
+  assert_output --partial "recovering it to write over it"
+  refute_output --partial "lego metadata was not stored"
+  run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .action' "${METRICS_OUT}"
+  assert_output "issued"
+  [ -f "${CW_STATE}/secrets/${kv}-meta" ]
+  [ ! -f "${CW_STATE}/deleted-secrets/${kv}-meta" ]
+
+  # The point of it: the next run finds the metadata and lets ARI decide. Without the recovery it
+  # would find none, order a new certificate, and do the same on every run after.
+  run_warden
+  assert_success
+  run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .action' "${METRICS_OUT}"
+  assert_output "skipped"
+}

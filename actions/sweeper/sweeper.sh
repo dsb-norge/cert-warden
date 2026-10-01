@@ -18,6 +18,14 @@
 #       certs that ever reach expiry are ORPHANS — e.g. a zone removed from dns_zones whose listener
 #       + placeholder TF dropped, leaving its cert to lapse (§3.1). Those SHOULD be reaped, which is
 #       why le-cert-production- is deliberately NOT protected (sweeping by expiry, not by name).
+#   DELETE — orphaned lego metadata (follows the certificate it belongs to):
+#     - any le-cert-*-pfx-meta secret whose certificate (the same name without -meta) is not in
+#       the vault, or is deleted by this run. The warden writes one beside every certificate it
+#       issues and never deletes it, so a production zone removed from dns_zones would otherwise
+#       leave its -meta behind for good, whether the consumer's IaC purged the certificate or let
+#       it lapse for the expiry rule above. Matched by the naming scheme (docs/contracts.md §3)
+#       rather than a prefix input. The warden recovers a -meta this rule soft-deleted if the
+#       zone comes back while its name is still reserved.
 #   NEVER DELETE — protected prefixes (${PROTECTED_PREFIXES}):
 #     - cert-                         TF-managed legacy acme imports (Terraform owns their
 #                                     lifecycle; under the "accept destruction" route TF drops
@@ -54,7 +62,7 @@ fi
 KV_NAME="${KV_NAME:?KV_NAME is required (the web-certs Key Vault name)}"
 LOG_ONLY="${LOG_ONLY:-true}" # default-safe: dry run unless explicitly disabled
 SWEEP_EXPIRED="${SWEEP_EXPIRED:-true}"
-MAX_DELETIONS="${MAX_DELETIONS:-120}" # ~ (41 staging certs + 41 -meta + a few account secrets) with headroom
+MAX_DELETIONS="${MAX_DELETIONS:-120}" # ~ (41 staging certs + 41 -meta + a few account secrets) with headroom; a removed production zone adds one orphaned -meta
 
 # Space-separated name prefixes. Defaults encode the Cert Warden migration's orphan-by-design set.
 TARGET_CERT_PREFIXES="${TARGET_CERT_PREFIXES:-le-cert-staging-}"
@@ -77,6 +85,26 @@ function matches_any_prefix {
 # Guard: a protected prefix always wins. Returns 0 when the name must never be deleted.
 function is_protected {
   matches_any_prefix "${1}" "${PROTECTED_PREFIXES}"
+}
+
+# Return 0 when $1 equals any of the remaining arguments, else 1.
+function in_list {
+  local needle="${1}" item
+  shift
+  for item in "$@"; do
+    [[ "${item}" == "${needle}" ]] && return 0
+  done
+  return 1
+}
+
+# Return 0 when $1 is lego metadata (le-cert-<le-env>-<zone>-pfx-meta) whose certificate does not
+# stay in the vault: it is not listed, or this run deletes it. Reads staying_certs, filled by the
+# certificate pass. That list comes from `certificate list` on purpose: `az keyvault secret list`
+# leaves out certificate-backing secrets (no --include-managed), so a certificate is never
+# visible in the secret listing, and pairing against that would orphan every -meta in the vault.
+function is_orphaned_meta {
+  [[ "${1}" == le-cert-*-pfx-meta ]] || return 1
+  ! in_list "${1%-meta}" "${staying_certs[@]+"${staying_certs[@]}"}"
 }
 
 # --- gather deletion candidates -------------------------------------------------------------
@@ -108,7 +136,8 @@ secretListTsv="$(az keyvault secret list --vault-name "${KV_NAME}" --query "[].n
 }
 mapfile -t secret_names < <(printf '%s' "${secretListTsv}")
 
-declare -a del_certs=() del_secrets=()
+# staying_certs: every listed certificate this run does not delete (see is_orphaned_meta).
+declare -a del_certs=() del_secrets=() staying_certs=()
 
 start-group "Evaluating ${#cert_rows[@]} certificate(s)"
 for row in "${cert_rows[@]}"; do
@@ -117,6 +146,7 @@ for row in "${cert_rows[@]}"; do
 
   if is_protected "${name}"; then
     log-info "  protect : ${name} (protected prefix)"
+    staying_certs+=("${name}")
     continue
   fi
 
@@ -136,6 +166,7 @@ for row in "${cert_rows[@]}"; do
     del_certs+=("${name}")
   else
     log-info "  keep    : ${name}"
+    staying_certs+=("${name}")
   fi
 done
 end-group
@@ -149,15 +180,19 @@ for name in "${secret_names[@]}"; do
   if matches_any_prefix "${name}" "${TARGET_SECRET_PREFIXES}"; then
     log-info "  DELETE  : ${name} [orphan-name]"
     del_secrets+=("${name}")
+  elif is_orphaned_meta "${name}"; then
+    log-info "  DELETE  : ${name} [orphan-meta]"
+    del_secrets+=("${name}")
   else
     log-info "  keep    : ${name}"
   fi
 done
 end-group
 
-# NOTE: deleting a certificate also deletes its backing secret of the same name. The secret list
-# above can therefore include the cert-backing secrets; they are filtered out here so we don't
-# try to delete a secret that the cert delete already removed (a deleted cert's secret 404s).
+# NOTE: deleting a certificate also deletes its backing secret of the same name, and deleting
+# that secret again would 404 and abort the sweep half-way. `az keyvault secret list` leaves
+# certificate-backing secrets out (we don't pass --include-managed), so in practice there is
+# nothing to filter here; it stays as a guard should the listing ever include them.
 declare -a del_secrets_filtered=()
 for s in "${del_secrets[@]+"${del_secrets[@]}"}"; do
   skip="false"

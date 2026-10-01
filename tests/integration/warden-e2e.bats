@@ -263,8 +263,9 @@ AdaptiveCard"
   cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
 [ {"name": "cw-test.internal", "nameServers": ["ns1.cw-test.internal."]} ]
 JSON
-  # A fresh vault holds no soft-deleted names either: e2e-6 left the account secrets and the
-  # certificate soft-deleted, and the new account registered below could not be stored over them.
+  # A fresh vault holds no soft-deleted names either. e2e-6 left the account secrets and the
+  # certificate soft-deleted; writing over those is a scenario of its own, and this one is about
+  # registration and issuance under chaos.
   rm -f "${CW_STATE}"/secrets/* "${CW_STATE}"/deleted-secrets/* \
     "${CW_STATE}"/certs/* "${CW_STATE}"/deleted-certs/* 2>/dev/null || true
 

@@ -78,10 +78,22 @@ jobs:
       bot-alias: "from-canary" # a low-noise channel
 ```
 
-## Hygiene is free by design
+## Hygiene, and what the sweeper does to the next run
 
-Canary issuances land as `le-cert-staging-*` objects — exactly what the sweeper's default
-target prefixes reap. A consumer running the full suite gets canary cleanup for nothing.
+Canary issuances land as `le-cert-staging-*` objects, with the account in
+`letsencrypt-staging-account-*` secrets — exactly what the sweeper's default target prefixes
+reap. A consumer running the full suite gets canary cleanup without configuring anything.
+
+That cleanup is a soft delete, and Key Vault keeps a soft-deleted name taken for the vault's
+retention period (7–90 days). The canary's next run writes the same names again, so the warden
+recovers each soft-deleted object it needs (the account secrets, every certificate and its
+`-meta` secret) and writes over it. What that means for you:
+
+- The cert-maintainer identity needs `recover` on certificates and secrets. Key Vault
+  Certificates Officer and Key Vault Secrets Officer include it; custom roles must grant it
+  (see [consumer-prerequisites.md](consumer-prerequisites.md)).
+- A run after a sweep finds no account in the vault and registers a new one. Once a week is far
+  inside Let's Encrypt staging's limits.
 
 ## Notes
 

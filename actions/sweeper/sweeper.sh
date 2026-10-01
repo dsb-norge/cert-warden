@@ -41,6 +41,9 @@
 #   - MAX_DELETIONS  -> abort before deleting if the candidate count exceeds this (spike guard;
 #                       a sudden jump from the expected handful is a signal something is wrong).
 #   - A protected-prefix match always wins over any target/expiry match.
+#   - Soft delete keeps each name taken for the retention period. The warden recovers any name it
+#     has to write again (a certificate, an account secret, a -meta), so a sweep never blocks its
+#     next run -- a staging canary's included.
 #
 # Requires: az (logged in as an identity with Key Vault Certificates Officer + Secrets Officer on
 # the vault — the cert_maintainer identity already has both) and jq. The runner must reach the

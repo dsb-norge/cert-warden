@@ -569,6 +569,83 @@ keyvault secret set"
   assert_output "1"
 }
 
+# PATH-shim az for importCertificateIntoKeyVault: `certificate import` succeeds unless
+# AZ_STUB_IMPORT_FAILS is set, or the name is soft-deleted -- the file AZ_STUB_SOFT_DELETED, while
+# it exists. Every call is logged.
+stub_az_for_import() {
+  export AZ_STUB_CALLS="${BATS_TEST_TMPDIR}/az-calls.log"
+  export AZ_STUB_SOFT_DELETED="${BATS_TEST_TMPDIR}/soft-deleted"
+  : >"${AZ_STUB_CALLS}"
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  cat >"${BATS_TEST_TMPDIR}/bin/az" <<'AZSTUB'
+#!/usr/bin/env bash
+echo "az $*" >>"${AZ_STUB_CALLS}"
+case "$1 $2 $3" in
+  "keyvault certificate import")
+    if [[ -f "${AZ_STUB_SOFT_DELETED}" ]]; then
+      echo "ERROR: (Conflict) Certificate $7 is currently in a deleted but recoverable state, and its name cannot be reused; in this state, the certificate can only be recovered or purged." >&2
+      exit 1
+    fi
+    [[ -z "${AZ_STUB_IMPORT_FAILS:-}" ]] || { echo "ERROR: (BadParameter) import refused" >&2; exit 1; }
+    echo "{\"sid\": \"https://kv.vault.azure.test/secrets/$7/0000\"}" ;;
+  "keyvault certificate show-deleted")
+    [[ -f "${AZ_STUB_SOFT_DELETED}" ]] || { echo "ERROR: (CertificateNotFound) Deleted Certificate not found: $5" >&2; exit 1; }
+    echo "https://kv.vault.azure.test/deletedcertificates/$5" ;;
+  "keyvault certificate recover")
+    [[ -z "${AZ_STUB_RECOVER_FAILS:-}" ]] || { echo "ERROR: (Forbidden) recover refused" >&2; exit 1; }
+    rm "${AZ_STUB_SOFT_DELETED}"
+    echo '{}' ;;
+  *) echo "az stub: unhandled: $*" >&2; exit 64 ;;
+esac
+AZSTUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+}
+
+@test "importCertificateIntoKeyVault recovers a soft-deleted certificate and imports over it" {
+  # A staging canary's next run after a sweep, or a zone back inside the retention period: the
+  # certificate's name is still taken by the soft-deleted one.
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_import
+  touch "${AZ_STUB_SOFT_DELETED}"
+  run importCertificateIntoKeyVault "le-cert-staging-x-example-test-pfx" "/tmp/x.pfx" "pw"
+  assert_success
+  assert_output --partial "recovering it to import over it"
+  run awk '{print $2, $3, $4}' "${AZ_STUB_CALLS}"
+  assert_output "keyvault certificate import
+keyvault certificate show-deleted
+keyvault certificate recover
+keyvault certificate import"
+  # The caller reads the import's result, so it must come from the import that succeeded.
+  touch "${AZ_STUB_SOFT_DELETED}"
+  importCertificateIntoKeyVault "le-cert-staging-x-example-test-pfx" "/tmp/x.pfx" "pw"
+  [ "$(jq -r .sid <<<"${importResultJson}")" = "https://kv.vault.azure.test/secrets/le-cert-staging-x-example-test-pfx/0000" ]
+}
+
+@test "importCertificateIntoKeyVault recovers nothing when the import failed for another reason" {
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_import
+  export AZ_STUB_IMPORT_FAILS=1
+  run importCertificateIntoKeyVault "le-cert-staging-x-example-test-pfx" "/tmp/x.pfx" "pw"
+  assert_failure
+  run grep -c "certificate recover" "${AZ_STUB_CALLS}"
+  assert_output "0"
+}
+
+@test "importCertificateIntoKeyVault fails when the recovery fails, without importing again" {
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_import
+  touch "${AZ_STUB_SOFT_DELETED}"
+  export AZ_STUB_RECOVER_FAILS=1
+  run importCertificateIntoKeyVault "le-cert-staging-x-example-test-pfx" "/tmp/x.pfx" "pw"
+  assert_failure
+  run grep -c "certificate import" "${AZ_STUB_CALLS}"
+  assert_output "1"
+}
+
 @test "recordCertMetric survives a certificate without SANs (P-12 guard)" {
   source "${WARDEN_SH}"
   loadConfig

@@ -529,6 +529,20 @@ keyvault secret recover
 keyvault secret set"
 }
 
+@test "setKeyVaultSecret recovers even when called bare under set -e (P-2, child-process probe)" {
+  # The account secrets are written with bare calls, where errexit is live inside the function.
+  # A failing az call that is not if-tested would end the run there, before the recovery.
+  stub_az_for_metadata
+  touch "${AZ_STUB_SOFT_DELETED}"
+  run bash -c "set -euo pipefail; shopt -s inherit_errexit; source '${WARDEN_SH}'; loadConfig
+    setKeyVaultSecret letsencrypt-staging-account-key value 'account key'
+    echo CARRIED-ON"
+  assert_success
+  assert_output --partial "recovering it to write over it"
+  assert_output --partial "Stored account key in KeyVault secret"
+  assert_output --partial "CARRIED-ON"
+}
+
 @test "storeLegoMetadataInKeyVault recovers nothing when the write failed for another reason" {
   source "${WARDEN_SH}"
   loadConfig

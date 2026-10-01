@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.6.0](https://github.com/dsb-norge/cert-warden/compare/v1.5.0...v1.6.0) (2026-10-01)
+
+
+### Features
+
+* **sweeper:** soft-delete -meta secrets whose certificate is gone ([41ac26d](https://github.com/dsb-norge/cert-warden/commit/41ac26dea6ad00f7e9d3e1db055596e6f95b5af8))
+
+
+### Bug Fixes
+
+* **warden:** annotate the run when lego metadata cannot be stored ([4943779](https://github.com/dsb-norge/cert-warden/commit/4943779f89551ed40179f4e2c42581146f87a8dd))
+* **warden:** recover a soft-deleted -meta secret before writing it ([5daa044](https://github.com/dsb-norge/cert-warden/commit/5daa044561b5be77f63631596b426456720b3a6b))
+* **warden:** recover a soft-deleted certificate before importing over it ([f44ee1c](https://github.com/dsb-norge/cert-warden/commit/f44ee1c844aeee3774d986967c4f501dc37eac73))
+* **warden:** store a new account over soft-deleted account secrets ([52486c4](https://github.com/dsb-norge/cert-warden/commit/52486c427f18a5bbdda4cd12313c417996b72172))
+
 ## [1.5.0](https://github.com/dsb-norge/cert-warden/compare/v1.4.0...v1.5.0) (2026-10-01)
 
 

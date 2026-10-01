@@ -441,6 +441,60 @@ AZSTUB
   assert_failure
 }
 
+# PATH-shim az for storeLegoMetadataInKeyVault: `secret set` succeeds unless AZ_STUB_SET_FAILS is
+# set. Every call is logged so a test can assert what was (not) attempted.
+stub_az_for_metadata() {
+  export AZ_STUB_CALLS="${BATS_TEST_TMPDIR}/az-calls.log"
+  : >"${AZ_STUB_CALLS}"
+  mkdir -p "${BATS_TEST_TMPDIR}/bin"
+  cat >"${BATS_TEST_TMPDIR}/bin/az" <<'AZSTUB'
+#!/usr/bin/env bash
+echo "az $*" >>"${AZ_STUB_CALLS}"
+case "$1 $2 $3" in
+  "keyvault secret set")
+    [[ -z "${AZ_STUB_SET_FAILS:-}" ]] || { echo "ERROR: (Forbidden) set refused" >&2; exit 1; }
+    echo "https://kv.vault.azure.test/secrets/$5/0000" ;;
+  *) echo "az stub: unhandled: $*" >&2; exit 64 ;;
+esac
+AZSTUB
+  chmod +x "${BATS_TEST_TMPDIR}/bin/az"
+  export PATH="${BATS_TEST_TMPDIR}/bin:${PATH}"
+  echo '{"domains":["x.example.test"],"certUrl":"https://ca.test/cert/1"}' >"${BATS_TEST_TMPDIR}/x.json"
+}
+
+@test "storeLegoMetadataInKeyVault stores the metadata without a word of warning" {
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_metadata
+  run storeLegoMetadataInKeyVault "${BATS_TEST_TMPDIR}/x.json" "le-cert-staging-x-example-test-pfx-meta"
+  assert_success
+  assert_output --partial "Stored lego metadata"
+  refute_output --partial "::warning::"
+}
+
+@test "storeLegoMetadataInKeyVault annotates the run when the write fails" {
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_metadata
+  export AZ_STUB_SET_FAILS=1
+  run storeLegoMetadataInKeyVault "${BATS_TEST_TMPDIR}/x.json" "le-cert-staging-x-example-test-pfx-meta"
+  assert_failure
+  # One annotation, naming the secret and what it costs; a log line alone goes unread.
+  assert_line --regexp '^::warning::.*le-cert-staging-x-example-test-pfx-meta.*re-issue this certificate'
+}
+
+@test "storeLegoMetadataInKeyVault annotates the run when lego wrote no metadata" {
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_metadata
+  run storeLegoMetadataInKeyVault "${BATS_TEST_TMPDIR}/missing.json" "le-cert-staging-x-example-test-pfx-meta"
+  assert_failure
+  assert_line --regexp '^::warning::.*lego wrote no metadata file'
+  # Nothing to store, so nothing was sent to Key Vault.
+  run cat "${AZ_STUB_CALLS}"
+  assert_output ""
+}
+
 @test "recordCertMetric survives a certificate without SANs (P-12 guard)" {
   source "${WARDEN_SH}"
   loadConfig

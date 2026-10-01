@@ -1490,15 +1490,15 @@ function main() {
         # compress and validate json with jq
         accountJsonMinified=$(jq -c . "${accountJsonPath}")
 
-        # save to KeyVault
-        accountJsonSecretId=$(az keyvault secret set --name "${letsencryptAccountJsonSecretName}" --vault-name "${certKvName}" --value "${accountJsonMinified}" --query id -o tsv)
-        log-info "    Stored account JSON in KeyVault secret: ${accountJsonSecretId}"
-
-        accountEmailSecretId=$(az keyvault secret set --name "${letsencryptAccountEmailSecretName}" --vault-name "${certKvName}" --value "${accountEmail}" --query id -o tsv)
-        log-info "    Stored account email in KeyVault secret: ${accountEmailSecretId}"
-
-        accountKeySecretId=$(az keyvault secret set --name "${letsencryptAccountKeySecretName}" --vault-name "${certKvName}" --value "$(cat "${accountKeyPath}")" --query id -o tsv)
-        log-info "    Stored account key in KeyVault secret: ${accountKeySecretId}"
+        # save to KeyVault. A new account is registered when the vault shows none, and that
+        # includes account secrets the sweeper soft-deleted (it targets the staging ones by
+        # prefix): their names are still taken, so setKeyVaultSecret recovers each and writes the
+        # new account over it. Bare calls on purpose: a run that cannot store its account must
+        # not go on with it. That stop comes before the metrics are written, a gap the
+        # metrics-survive-partial-failure guarantee (e2e-4) does not cover.
+        setKeyVaultSecret "${letsencryptAccountJsonSecretName}" "${accountJsonMinified}" "account JSON"
+        setKeyVaultSecret "${letsencryptAccountEmailSecretName}" "${accountEmail}" "account email"
+        setKeyVaultSecret "${letsencryptAccountKeySecretName}" "$(cat "${accountKeyPath}")" "account key"
 
         # only do this for the first successful cert request
         creatingLetsEncryptAccount=false

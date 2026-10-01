@@ -264,8 +264,8 @@ AdaptiveCard"
 [ {"name": "cw-test.internal", "nameServers": ["ns1.cw-test.internal."]} ]
 JSON
   # A fresh vault holds no soft-deleted names either. e2e-6 left the account secrets and the
-  # certificate soft-deleted; writing over those is a scenario of its own, and this one is about
-  # registration and issuance under chaos.
+  # certificate soft-deleted; writing over those is a scenario of its own (e2e-18), and this one
+  # is about registration and issuance under chaos.
   rm -f "${CW_STATE}"/secrets/* "${CW_STATE}"/deleted-secrets/* \
     "${CW_STATE}"/certs/* "${CW_STATE}"/deleted-certs/* 2>/dev/null || true
 
@@ -704,4 +704,30 @@ JSON
   assert_success
   run jq -r '.[] | select(.zone == "zone2.cw-test.internal") | .action' "${METRICS_OUT}"
   assert_output "skipped"
+}
+
+@test "e2e-18 a staging canary's next run after a sweep: every name it writes is soft-deleted" {
+  # The reference canary issues staging certificates every week into the vault the sweeper
+  # sweeps, and the sweeper's default prefixes soft-delete all of it: the certificates, their
+  # -meta, and the account secrets. The canary's next run writes the same names while they are
+  # still taken. Before the warden recovered them, it stopped at the account with a Conflict.
+  KV_NAME="kv-l2" LOG_ONLY="false" run bash "${SWEEPER_SH}"
+  assert_success
+  [ -f "${CW_STATE}/deleted-certs/le-cert-staging-cw-test-internal-pfx.json" ]
+  [ -f "${CW_STATE}/deleted-secrets/le-cert-staging-cw-test-internal-pfx-meta" ]
+  [ -f "${CW_STATE}/deleted-secrets/letsencrypt-staging-account-key" ]
+
+  CERT_FORCE_ALL_NEW=true run_warden
+  assert_success
+  # The vault shows no account, so a new one is registered and stored over the soft-deleted
+  # secrets; each certificate and its -meta are recovered and written over the same way.
+  assert_output --partial "A new account will be created"
+  assert_output --partial "A soft-deleted secret holds the name letsencrypt-staging-account-key"
+  assert_output --partial "A soft-deleted certificate holds the name le-cert-staging-cw-test-internal-pfx"
+  refute_output --partial "lego metadata was not stored"
+  run jq -r 'map(.action) | unique | join(",")' "${METRICS_OUT}"
+  assert_output "issued"
+  # Nothing the run needed is left soft-deleted.
+  run find "${CW_STATE}/deleted-certs" "${CW_STATE}/deleted-secrets" -type f
+  assert_output ""
 }

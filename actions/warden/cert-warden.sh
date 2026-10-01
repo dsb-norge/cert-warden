@@ -568,6 +568,36 @@ function setKeyVaultSecret() {
   return 1
 }
 
+# Import a PFX as a Key Vault certificate, recovering it first when a soft-deleted certificate
+# holds the name. Same reason as setKeyVaultSecret: the sweeper soft-deletes staging certificates
+# by prefix and production ones once they have expired, and either name can be wanted again
+# within the retention period -- by a staging canary's next run, or by a zone that comes back.
+# The recovered certificate is the current version only until the import, the very next call,
+# adds the new one on top of it.
+# Arguments:
+#   1: certificate name
+#   2: PFX file path
+#   3: PFX password
+# Uses globals: certKvName, kvCertSecretTags
+# Sets: importResultJson, the import's JSON output, when it succeeds
+# Returns: 0 imported, 1 not
+function importCertificateIntoKeyVault() {
+  local _name="$1"
+  local -a _import=(az keyvault certificate import --vault-name "${certKvName}" --name "${_name}"
+    --file "$2" --password "$3" --tags "${kvCertSecretTags[@]}")
+  if importResultJson=$("${_import[@]}"); then
+    return 0
+  fi
+  if az keyvault certificate show-deleted --name "${_name}" --vault-name "${certKvName}" --query recoveryId -o tsv &>/dev/null; then
+    log-info "  A soft-deleted certificate holds the name ${_name}; recovering it to import over it"
+    if az keyvault certificate recover --name "${_name}" --vault-name "${certKvName}" >/dev/null &&
+      importResultJson=$("${_import[@]}"); then
+      return 0
+    fi
+  fi
+  return 1
+}
+
 # Annotate the run when a certificate's metadata could not be stored. The certificate itself is
 # in Key Vault and serving, so the run carries on. What the next run does depends on what the
 # secret still holds. If it holds metadata from an earlier certificate of the zone, as after a
@@ -1520,14 +1550,7 @@ function main() {
       else
         log-info "  Certificate file found: ${pfxCertPath}"
         log-info "  Importing certificate into KeyVault: ${certKvName}, secret name: ${certKvPfxSecretName}"
-        if importResultJson=$(
-          az keyvault certificate import \
-            --vault-name "${certKvName}" \
-            --name "${certKvPfxSecretName}" \
-            --file "${pfxCertPath}" \
-            --password "${pfxCertPassword}" \
-            --tags "${kvCertSecretTags[@]}"
-        ); then
+        if importCertificateIntoKeyVault "${certKvPfxSecretName}" "${pfxCertPath}" "${pfxCertPassword}"; then
           log-info "  Successfully imported certificate into KeyVault"
 
           # output versionless id of the imported secret

@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/dsb-norge/cert-warden/compare/v1.4.0...v1.5.0) (2026-10-01)
+
+
+### Features
+
+* **monitor:** report issued certificates on the card and in the summary ([6497712](https://github.com/dsb-norge/cert-warden/commit/64977124632bb58f68ff4f735d41d4ada4babc18))
+
 ## [1.4.0](https://github.com/dsb-norge/cert-warden/compare/v1.3.1...v1.4.0) (2026-09-30)
 
 

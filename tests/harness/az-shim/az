@@ -12,6 +12,9 @@
 #   certs/<name>.json         {"name","sans":[...],"notBefore","expires","cn","tags":{...}} — written by
 #                             `certificate import`, which (like real Key Vault) REPLACES the tags with
 #                             its --tags. A scenario seeding a placeholder writes one without them.
+#   deleted-certs/<name>.*    soft-deleted certificates: <name>.json, and <name>.secret for the backing
+#                             secret that went with it. The name stays taken here too: `certificate
+#                             import` refuses it until it is recovered (or purged, by removing the files).
 #   fixtures/zones.json       output shape of: az network dns zone list -o json
 #   fixtures/recordsets-<zone>.json   output shape of: az network dns record-set list -o json
 #   calls.log                 every invocation, appended
@@ -27,7 +30,7 @@ set -euo pipefail
 shopt -s inherit_errexit
 
 state="${CW_AZ_STATE_DIR:?CW_AZ_STATE_DIR is required by the az shim}"
-mkdir -p "${state}/secrets" "${state}/deleted-secrets" "${state}/certs" "${state}/fixtures"
+mkdir -p "${state}/secrets" "${state}/deleted-secrets" "${state}/certs" "${state}/deleted-certs" "${state}/fixtures"
 echo "az $*" >>"${state}/calls.log"
 
 # --- generic arg parse ------------------------------------------------------------------------
@@ -176,13 +179,39 @@ case "${cmd[*]}" in
     ;;
 
   "keyvault certificate delete")
-    # Key Vault semantics: deleting a certificate also deletes its backing secret.
-    # Soft delete is modelled for plain secrets only: a certificate is removed outright here,
-    # where real Key Vault would keep its name reserved, too, until it is purged.
-    rm -f "${state}/certs/${name:?}.json" "${state}/secrets/${name}"
+    # Soft delete, and Key Vault semantics: the backing secret goes with the certificate.
+    [[ -f "${state}/certs/${name:?}.json" ]] || fail "(CertificateNotFound) A certificate with (name/id) ${name} was not found in this key vault."
+    mv "${state}/certs/${name}.json" "${state}/deleted-certs/${name}.json"
+    if [[ -f "${state}/secrets/${name}" ]]; then
+      mv "${state}/secrets/${name}" "${state}/deleted-certs/${name}.secret"
+    fi
+    ;;
+
+  "keyvault certificate show-deleted")
+    [[ -f "${state}/deleted-certs/${name:?}.json" ]] || fail "(CertificateNotFound) Deleted Certificate not found: ${name}"
+    recoveryId="https://${vault}.vault.azure.test/deletedcertificates/${name}"
+    if [[ "${query}" == "recoveryId" ]]; then
+      echo "${recoveryId}"
+    else
+      jq -n --arg n "${name}" --arg rid "${recoveryId}" '{name: $n, recoveryId: $rid}'
+    fi
+    ;;
+
+  "keyvault certificate recover")
+    # Real az waits for the recovery to finish before returning, so the name is usable at once.
+    [[ -f "${state}/deleted-certs/${name:?}.json" ]] || fail "(CertificateNotFound) Deleted Certificate not found: ${name}"
+    mv "${state}/deleted-certs/${name}.json" "${state}/certs/${name}.json"
+    if [[ -f "${state}/deleted-certs/${name}.secret" ]]; then
+      mv "${state}/deleted-certs/${name}.secret" "${state}/secrets/${name}"
+    fi
+    jq -n --arg n "${name}" --arg vault "${vault}" \
+      '{id: ("https://\($vault).vault.azure.test/certificates/\($n)/00000000000000000000000000003p1c"), name: $n}'
     ;;
 
   "keyvault certificate import")
+    # The message is real Key Vault's, which az prints after `ERROR: `.
+    [[ ! -f "${state}/deleted-certs/${name:?}.json" ]] ||
+      fail "(Conflict) Certificate ${name} is currently in a deleted but recoverable state, and its name cannot be reused; in this state, the certificate can only be recovered or purged."
     file="${opt[file]:?}"
     password="${opt[password]:-}"
     [[ -f "${file}" ]] || fail "import: file not found: ${file}"

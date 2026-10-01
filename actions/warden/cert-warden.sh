@@ -508,7 +508,7 @@ function installZoneCertFromKeyVault() {
 function storeLegoMetadataInKeyVault() {
   local _metaPath="$1" _metaSecretName="$2"
   if [ ! -f "${_metaPath}" ]; then
-    log-info "  WARNING: lego metadata file not found, cannot persist for ARI: ${_metaPath}"
+    warnLegoMetadataNotStored "${_metaSecretName}" "lego wrote no metadata file at ${_metaPath}"
     return 1
   fi
   local _id
@@ -516,8 +516,26 @@ function storeLegoMetadataInKeyVault() {
     log-info "    Stored lego metadata (for ARI) in KeyVault secret: ${_id}"
     return 0
   fi
-  log-info "  WARNING: failed to store lego metadata in KeyVault secret: ${_metaSecretName}"
+  warnLegoMetadataNotStored "${_metaSecretName}" "az keyvault secret set failed"
   return 1
+}
+
+# Annotate the run when a certificate's metadata could not be stored. The certificate itself is
+# in Key Vault and serving, so the run carries on. What the next run does depends on what the
+# secret still holds. If it holds metadata from an earlier certificate of the zone, as after a
+# failed write on a renewal, the next run renews as usual. If it holds none, as after a failed
+# first issuance, lego orders a new certificate instead of asking ARI, and the zone is re-issued
+# (recorded `renewed`). Once, that is harmless. On every run, it uses up Let's Encrypt's limit
+# of 5 certificates a week for the same names within days -- which is why it is an annotation
+# and not just a log line.
+# Arguments:
+#   1: Key Vault secret name for the metadata
+#   2: why it was not stored
+function warnLegoMetadataNotStored() {
+  # Single line: a workflow annotation cannot carry newlines.
+  echo "::warning::${_action_name}: lego metadata was not stored in Key Vault secret ${1} (${2})." \
+    "Unless the secret still holds metadata from an earlier certificate, the next run will" \
+    "re-issue this certificate instead of letting ARI decide when to renew it."
 }
 
 # Restore lego's per-certificate metadata (.json) from Key Vault into the lego store, so that

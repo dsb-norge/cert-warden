@@ -519,33 +519,52 @@ function storeLegoMetadataInKeyVault() {
     warnLegoMetadataNotStored "${_metaSecretName}" "lego wrote no metadata file at ${_metaPath}"
     return 1
   fi
-  local _metaJson _id
+  local _metaJson
   if ! _metaJson="$(jq -c . "${_metaPath}")"; then
     warnLegoMetadataNotStored "${_metaSecretName}" "lego's metadata file is not valid JSON"
     return 1
   fi
-  if _id=$(az keyvault secret set --name "${_metaSecretName}" --vault-name "${certKvName}" --value "${_metaJson}" --query id -o tsv); then
-    log-info "    Stored lego metadata (for ARI) in KeyVault secret: ${_id}"
+  # The sweeper soft-deletes a -meta secret once its certificate is gone, so a zone that comes
+  # back inside the retention period finds the name taken; setKeyVaultSecret recovers it. Left
+  # alone, that would repeat on every run: no metadata, so lego orders a new certificate each
+  # time. Should the write still fail after a recovery, the recovered value stays, which is
+  # metadata from an earlier certificate of this zone, and that renews correctly (see above).
+  if setKeyVaultSecret "${_metaSecretName}" "${_metaJson}" "lego metadata (for ARI)"; then
     return 0
   fi
+  warnLegoMetadataNotStored "${_metaSecretName}" "az keyvault secret set failed"
+  return 1
+}
 
-  # Key Vault keeps a soft-deleted secret's name for the vault's whole retention period (7 to 90
-  # days) and refuses to set it until it is recovered or purged. The sweeper soft-deletes a -meta
-  # secret once its certificate is gone, so a zone that comes back inside that period lands here
-  # on its first issuance. Left alone, it would land here on every run after that, too: no
-  # metadata, so lego orders a new certificate each time. Recover the old secret and write over
-  # it. Recover, not purge: it works with purge protection on, and the Secrets Officer role
-  # already allows it. Should the write still fail, the recovered value stays, which is metadata
-  # from an earlier certificate of this zone, and that renews correctly (see above).
-  if az keyvault secret show-deleted --name "${_metaSecretName}" --vault-name "${certKvName}" --query recoveryId -o tsv &>/dev/null; then
-    log-info "    A soft-deleted secret holds the name ${_metaSecretName}; recovering it to write over it"
-    if az keyvault secret recover --name "${_metaSecretName}" --vault-name "${certKvName}" >/dev/null &&
-      _id=$(az keyvault secret set --name "${_metaSecretName}" --vault-name "${certKvName}" --value "${_metaJson}" --query id -o tsv); then
-      log-info "    Stored lego metadata (for ARI) in KeyVault secret: ${_id}"
+# Write a Key Vault secret, recovering it first when a soft-deleted secret holds the name.
+#
+# Key Vault keeps a soft-deleted object's name for the vault's whole retention period (7 to 90
+# days) and refuses to write to it until it is recovered or purged (docs/testing.md, P-26). The
+# sweeper soft-deletes names this script writes again, so when a write fails and a soft-deleted
+# secret holds the name, recover it and write over it. Recover, not purge: it works with purge
+# protection on, and the Key Vault Secrets Officer role already allows it.
+#
+# Every az call is if-tested, so this is safe to call bare under `set -e`: it returns 1 rather
+# than aborting, and the caller decides whether that is fatal.
+# Arguments:
+#   1: secret name
+#   2: value
+#   3: what the secret holds, for the log line
+# Returns: 0 written, 1 not
+function setKeyVaultSecret() {
+  local _name="$1" _value="$2" _what="$3" _id
+  if _id=$(az keyvault secret set --name "${_name}" --vault-name "${certKvName}" --value "${_value}" --query id -o tsv); then
+    log-info "    Stored ${_what} in KeyVault secret: ${_id}"
+    return 0
+  fi
+  if az keyvault secret show-deleted --name "${_name}" --vault-name "${certKvName}" --query recoveryId -o tsv &>/dev/null; then
+    log-info "    A soft-deleted secret holds the name ${_name}; recovering it to write over it"
+    if az keyvault secret recover --name "${_name}" --vault-name "${certKvName}" >/dev/null &&
+      _id=$(az keyvault secret set --name "${_name}" --vault-name "${certKvName}" --value "${_value}" --query id -o tsv); then
+      log-info "    Stored ${_what} in KeyVault secret: ${_id}"
       return 0
     fi
   fi
-  warnLegoMetadataNotStored "${_metaSecretName}" "az keyvault secret set failed"
   return 1
 }
 

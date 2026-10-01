@@ -1,7 +1,8 @@
 name: "cert-sweeper"
 description: >-
   Soft-delete orphaned/expired objects from the web-certs Key Vault: certificates/secrets
-  matching the target prefixes plus an expiry backstop, never touching protected prefixes.
+  matching the target prefixes, an expiry backstop, and lego -meta secrets whose certificate is
+  gone, never touching protected prefixes.
   Defaults to a DRY RUN (log-only=true). Assumes az login done (OIDC).
 
 inputs:

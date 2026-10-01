@@ -54,10 +54,14 @@ seed_typical_vault() {
 ]
 JSON
   # Shape = output of: az keyvault secret list --query "[].name" -o tsv
+  # No certificate-backing secrets: without --include-managed, az leaves them out (testing.md P-25).
+  # One -meta per lifecycle: a live zone's, a lapsed zone's (its certificate expired) and a removed
+  # zone's (its IaC purged the certificate, so only the -meta is left).
   cat >"${AZ_STUB_SECRETS_TSV}" <<'TSV'
-le-cert-production-live-example-pfx
-le-cert-staging-orphan-example-pfx
 le-cert-staging-orphan-example-pfx-meta
+le-cert-production-live-example-pfx-meta
+le-cert-production-lapsed-zone-pfx-meta
+le-cert-production-removed-zone-pfx-meta
 letsencrypt-staging-account-key
 letsencrypt-production-account-key
 TSV
@@ -94,11 +98,62 @@ TSV
   export SWEEP_EXPIRED="false"
   run bash "${SWEEPER_SH}"
   assert_success
-  assert_output --partial "keep    : le-cert-production-lapsed-zone-pfx"
+  assert_line --partial "keep    : le-cert-production-lapsed-zone-pfx"
+  # ... and their -meta with them: it follows the certificate, not the expiry.
+  assert_line --partial "keep    : le-cert-production-lapsed-zone-pfx-meta"
+}
+
+@test "orphaned -meta: deleted once its certificate is gone or deleted, kept while it stays" {
+  seed_typical_vault
+  export LOG_ONLY="false"
+  run bash "${SWEEPER_SH}"
+  assert_success
+  # The removed zone's certificate is not in the vault at all:
+  assert_line --partial "DELETE  : le-cert-production-removed-zone-pfx-meta [orphan-meta]"
+  # The lapsed zone's certificate is deleted by this very run, for expiry:
+  assert_line --partial "DELETE  : le-cert-production-lapsed-zone-pfx-meta [orphan-meta]"
+  # The live zone's certificate stays, so its metadata does too:
+  assert_line --partial "keep    : le-cert-production-live-example-pfx-meta"
+  # Soft-deleted as plain secrets:
+  run grep -c -e "secret delete --vault-name kv-unittest --name le-cert-production-removed-zone-pfx-meta$" \
+    -e "secret delete --vault-name kv-unittest --name le-cert-production-lapsed-zone-pfx-meta$" "${AZ_STUB_CALLS}"
+  assert_output "2"
+  run grep -c "le-cert-production-live-example-pfx-meta" "${AZ_STUB_CALLS}"
+  assert_output "0"
+}
+
+@test "orphaned -meta: a protected certificate keeps its -meta" {
+  seed_typical_vault
+  # A protected certificate stays even when it has expired, so its metadata is not an orphan.
+  cat >"${AZ_STUB_CERTS_JSON}" <<'JSON'
+[ {"name": "le-cert-production-pinned-zone-pfx", "exp": "2001-01-01T00:00:00+00:00"} ]
+JSON
+  echo "le-cert-production-pinned-zone-pfx-meta" >"${AZ_STUB_SECRETS_TSV}"
+  export PROTECTED_PREFIXES="letsencrypt-production-account- cert- le-cert-production-pinned-"
+  run bash "${SWEEPER_SH}"
+  assert_success
+  assert_line --partial "protect : le-cert-production-pinned-zone-pfx (protected prefix)"
+  assert_line --partial "protect : le-cert-production-pinned-zone-pfx-meta (protected prefix)"
+  refute_output --partial "orphan-meta"
+}
+
+@test "orphaned -meta: only the naming scheme's -meta secrets are candidates" {
+  # Consumers keep other things in this vault. A secret that merely ends in -meta, or a
+  # le-cert-* secret that is not a certificate's metadata, is none of the sweeper's business.
+  printf '%s\n' "app-settings-meta" "le-cert-production-notes" "le-cert-production-x-meta" \
+    >"${AZ_STUB_SECRETS_TSV}"
+  run bash "${SWEEPER_SH}"
+  assert_success
+  assert_line --partial "keep    : app-settings-meta"
+  assert_line --partial "keep    : le-cert-production-notes"
+  assert_line --partial "keep    : le-cert-production-x-meta"
 }
 
 @test "destructive run deletes candidates and dedups cert-backing secrets" {
   seed_typical_vault
+  # az lists a certificate's backing secret only with --include-managed, which the sweeper does
+  # not pass; the dedup is a guard for a listing that ever does. Exercise it.
+  echo "le-cert-staging-orphan-example-pfx" >>"${AZ_STUB_SECRETS_TSV}"
   export LOG_ONLY="false"
   run bash "${SWEEPER_SH}"
   assert_success
@@ -170,9 +225,10 @@ AZSTUB
   assert_success
   run grep -vcE '^[a-z-]+=' "${GITHUB_OUTPUT}"
   assert_output "0"
-  run grep -c '^candidates-count=4$' "${GITHUB_OUTPUT}"
+  # 2 certificates + 4 secrets (2 by staging prefix, 2 orphaned production -meta):
+  run grep -c '^candidates-count=6$' "${GITHUB_OUTPUT}"
   assert_output "1"
-  run jq -e '.secrets | length == 2' <(grep '^candidates-json=' "${GITHUB_OUTPUT}" | cut -d= -f2-)
+  run jq -e '.secrets | length == 4' <(grep '^candidates-json=' "${GITHUB_OUTPUT}" | cut -d= -f2-)
   assert_success
 }
 

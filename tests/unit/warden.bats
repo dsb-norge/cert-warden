@@ -442,9 +442,11 @@ AZSTUB
 }
 
 # PATH-shim az for storeLegoMetadataInKeyVault: `secret set` succeeds unless AZ_STUB_SET_FAILS is
-# set. Every call is logged so a test can assert what was (not) attempted.
+# set, or the name is soft-deleted -- which the file AZ_STUB_SOFT_DELETED stands for, while it
+# exists. Every call is logged so a test can assert what was (not) attempted.
 stub_az_for_metadata() {
   export AZ_STUB_CALLS="${BATS_TEST_TMPDIR}/az-calls.log"
+  export AZ_STUB_SOFT_DELETED="${BATS_TEST_TMPDIR}/soft-deleted"
   : >"${AZ_STUB_CALLS}"
   mkdir -p "${BATS_TEST_TMPDIR}/bin"
   cat >"${BATS_TEST_TMPDIR}/bin/az" <<'AZSTUB'
@@ -452,8 +454,19 @@ stub_az_for_metadata() {
 echo "az $*" >>"${AZ_STUB_CALLS}"
 case "$1 $2 $3" in
   "keyvault secret set")
+    if [[ -f "${AZ_STUB_SOFT_DELETED}" ]]; then
+      echo "ERROR: (Conflict) Secret $5 is currently in a deleted but recoverable state, and its name cannot be reused; in this state, the secret can only be recovered or purged." >&2
+      exit 1
+    fi
     [[ -z "${AZ_STUB_SET_FAILS:-}" ]] || { echo "ERROR: (Forbidden) set refused" >&2; exit 1; }
     echo "https://kv.vault.azure.test/secrets/$5/0000" ;;
+  "keyvault secret show-deleted")
+    [[ -f "${AZ_STUB_SOFT_DELETED}" ]] || { echo "ERROR: (SecretNotFound) Deleted Secret not found: $5" >&2; exit 1; }
+    echo "https://kv.vault.azure.test/deletedsecrets/$5" ;;
+  "keyvault secret recover")
+    [[ -z "${AZ_STUB_RECOVER_FAILS:-}" ]] || { echo "ERROR: (Forbidden) recover refused" >&2; exit 1; }
+    rm "${AZ_STUB_SOFT_DELETED}"
+    echo '{}' ;;
   *) echo "az stub: unhandled: $*" >&2; exit 64 ;;
 esac
 AZSTUB
@@ -493,6 +506,53 @@ AZSTUB
   # Nothing to store, so nothing was sent to Key Vault.
   run cat "${AZ_STUB_CALLS}"
   assert_output ""
+}
+
+@test "storeLegoMetadataInKeyVault recovers a soft-deleted -meta secret and writes over it" {
+  # The zone came back while the sweeper's soft-delete of its old -meta still holds the name.
+  # Failing here would repeat on every run: no metadata, so lego orders a new certificate each
+  # time, until Let's Encrypt's duplicate-certificate limit stops it.
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_metadata
+  touch "${AZ_STUB_SOFT_DELETED}"
+  run storeLegoMetadataInKeyVault "${BATS_TEST_TMPDIR}/x.json" "le-cert-staging-x-example-test-pfx-meta"
+  assert_success
+  assert_output --partial "recovering it to write over it"
+  assert_output --partial "Stored lego metadata"
+  refute_output --partial "::warning::"
+  # Recover, then write -- never purge, which purge protection would refuse.
+  run awk '{print $2, $3, $4}' "${AZ_STUB_CALLS}"
+  assert_output "keyvault secret set
+keyvault secret show-deleted
+keyvault secret recover
+keyvault secret set"
+}
+
+@test "storeLegoMetadataInKeyVault recovers nothing when the write failed for another reason" {
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_metadata
+  export AZ_STUB_SET_FAILS=1
+  run storeLegoMetadataInKeyVault "${BATS_TEST_TMPDIR}/x.json" "le-cert-staging-x-example-test-pfx-meta"
+  assert_failure
+  assert_line --regexp '^::warning::.*le-cert-staging-x-example-test-pfx-meta'
+  run grep -c "secret recover" "${AZ_STUB_CALLS}"
+  assert_output "0"
+}
+
+@test "storeLegoMetadataInKeyVault annotates the run when the recovery fails" {
+  source "${WARDEN_SH}"
+  loadConfig
+  stub_az_for_metadata
+  touch "${AZ_STUB_SOFT_DELETED}"
+  export AZ_STUB_RECOVER_FAILS=1
+  run storeLegoMetadataInKeyVault "${BATS_TEST_TMPDIR}/x.json" "le-cert-staging-x-example-test-pfx-meta"
+  assert_failure
+  assert_line --regexp '^::warning::.*le-cert-staging-x-example-test-pfx-meta'
+  # The write is not retried against a name that is still soft-deleted.
+  run grep -c "secret set" "${AZ_STUB_CALLS}"
+  assert_output "1"
 }
 
 @test "recordCertMetric survives a certificate without SANs (P-12 guard)" {

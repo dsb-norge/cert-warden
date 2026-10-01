@@ -501,6 +501,14 @@ function installZoneCertFromKeyVault() {
 # the .json as a per-cert Key Vault SECRET so it can be restored before the next run. It is
 # rewritten on every issue/renew because the certUrl changes each time. Scoped per LE-env via
 # the secret name (it embeds ${letsencryptEnvironment} through certKvPfxSecretName).
+#
+# What lego does with it is narrower than the name suggests. Verified against lego v5.4.1
+# (cmd/cmd_run.go, cmd/cmd_run_renew.go), `lego run` reads three things from the .json: that it
+# exists (renew, rather than order a new certificate), its `profile` (a change forces a new
+# order), and its domains, but only when no --domains are passed, and the warden always passes
+# them. The ARI lookup, the renewal window and the `replaces` field all come from the .crt,
+# which is installed from Key Vault. So metadata left over from an EARLIER certificate of the
+# same zone still renews correctly; only missing metadata costs anything (one re-issue).
 # Arguments:
 #   1: lego metadata file path (e.g. ${legoCertificatesPath}/${zoneName}.json)
 #   2: Key Vault secret name for the metadata
@@ -511,10 +519,31 @@ function storeLegoMetadataInKeyVault() {
     warnLegoMetadataNotStored "${_metaSecretName}" "lego wrote no metadata file at ${_metaPath}"
     return 1
   fi
-  local _id
-  if _id=$(az keyvault secret set --name "${_metaSecretName}" --vault-name "${certKvName}" --value "$(jq -c . "${_metaPath}")" --query id -o tsv); then
+  local _metaJson _id
+  if ! _metaJson="$(jq -c . "${_metaPath}")"; then
+    warnLegoMetadataNotStored "${_metaSecretName}" "lego's metadata file is not valid JSON"
+    return 1
+  fi
+  if _id=$(az keyvault secret set --name "${_metaSecretName}" --vault-name "${certKvName}" --value "${_metaJson}" --query id -o tsv); then
     log-info "    Stored lego metadata (for ARI) in KeyVault secret: ${_id}"
     return 0
+  fi
+
+  # Key Vault keeps a soft-deleted secret's name for the vault's whole retention period (7 to 90
+  # days) and refuses to set it until it is recovered or purged. The sweeper soft-deletes a -meta
+  # secret once its certificate is gone, so a zone that comes back inside that period lands here
+  # on its first issuance. Left alone, it would land here on every run after that, too: no
+  # metadata, so lego orders a new certificate each time. Recover the old secret and write over
+  # it. Recover, not purge: it works with purge protection on, and the Secrets Officer role
+  # already allows it. Should the write still fail, the recovered value stays, which is metadata
+  # from an earlier certificate of this zone, and that renews correctly (see above).
+  if az keyvault secret show-deleted --name "${_metaSecretName}" --vault-name "${certKvName}" --query recoveryId -o tsv &>/dev/null; then
+    log-info "    A soft-deleted secret holds the name ${_metaSecretName}; recovering it to write over it"
+    if az keyvault secret recover --name "${_metaSecretName}" --vault-name "${certKvName}" >/dev/null &&
+      _id=$(az keyvault secret set --name "${_metaSecretName}" --vault-name "${certKvName}" --value "${_metaJson}" --query id -o tsv); then
+      log-info "    Stored lego metadata (for ARI) in KeyVault secret: ${_id}"
+      return 0
+    fi
   fi
   warnLegoMetadataNotStored "${_metaSecretName}" "az keyvault secret set failed"
   return 1

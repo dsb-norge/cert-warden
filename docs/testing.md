@@ -52,6 +52,17 @@ which is what lets e2e-16 seed a placeholder and watch the warden's first import
 `certificate show` returns the tag beside the policy (`{x509, issuedBy}`), the same projection the
 warden asks for.
 
+Secrets follow two Key Vault rules that are easy to get wrong:
+
+- **`secret list` leaves out certificate-backing secrets**, because `az` filters out managed
+  secrets unless it is given `--include-managed` (P-25). Code that needs to know which
+  certificates exist has to ask `certificate list`.
+- **`secret delete` soft-deletes.** The secret moves to `deleted-secrets/` and keeps its name,
+  so `secret set` on that name fails with real Key Vault's `Conflict` until `secret recover`
+  brings it back (P-26). A scenario that needs the name free again *purges* it, by removing the
+  file. Certificates are not modelled this way: `certificate delete` still removes the object
+  outright.
+
 **No rate limits anywhere in CI**: Pebble explicitly implements none ("It is not presently an
 appropriate tool for testing that your client handles Boulder/Let's Encrypt rate limits
 correctly" — Pebble README). A real LE `rateLimited` error is therefore untestable here, but
@@ -138,6 +149,8 @@ row AND the test — that's the review bar.
 | P-21 | hosted-image drift (az/jq/openssl versions); kcov not even packaged in Ubuntu 24.04 | pinned tool versions; bashcov needs only preinstalled Ruby; weekly scheduled CI run (drift canary) |
 | P-24 | test zone names NEST (`cw-test.internal` is a substring of `zone2.cw-test.internal`), so `grep "$zone"` over a call log passes or fails on which zone a run happened to pick. Match an anchored token — the Key Vault object name, whose `le-cert-staging-` prefix fixes where the zone part starts. **Bit e2e-9 in CI only**, because the order differed there | e2e-9's "not evaluated" assertion |
 | P-23 | jq precedence: `\|` binds LOOSER than `,`, so `A \| length, (B)` evaluates B against A's result, not the input — a two-count assertion silently measures the wrong thing and fails for the wrong reason. Bind with `as $x \|` instead. **Bit the e2e suite** | review bar; e2e-9's budget-split assertion |
+| P-25 | `az keyvault secret list` omits certificate-backing (managed) secrets unless given `--include-managed`. The shim used to list them, so logic that found a certificate through its secret passed here, and would have treated every certificate as gone in a real vault | az shim (`secret list`) |
+| P-26 | Key Vault soft-delete keeps the name: `secret set` on a soft-deleted name fails with `Conflict` for the whole retention period (7–90 days) unless the secret is recovered or purged first. Anything that deletes a secret the warden will write again must account for it | az shim (`secret delete`/`set`/`recover`); e2e-6 |
 | P-22 | **stdout overload**: in bash, human logs, function return values and machine protocols (GITHUB_OUTPUT, summaries) all share stdout — a logging change can corrupt the other two. **Bit this repo twice in one refactor** (string-returning predicates; output emission) | predicates return EXIT CODES; machine emission only via `set-output`; unit tests assert outputs/summaries are prefix-free |
 
 ## 6. Coverage policy

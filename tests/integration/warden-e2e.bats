@@ -250,6 +250,8 @@ AdaptiveCard"
   [ ! -f "${CW_STATE}/secrets/le-cert-staging-cw-test-internal-pfx" ]
   [ ! -f "${CW_STATE}/secrets/le-cert-staging-cw-test-internal-pfx-meta" ]
   [ ! -f "${CW_STATE}/secrets/letsencrypt-staging-account-key" ]
+  # Soft-deleted, not purged: recoverable, and holding its name for the retention period.
+  [ -f "${CW_STATE}/deleted-secrets/le-cert-staging-cw-test-internal-pfx-meta" ]
 }
 
 @test "e2e-7 chaos: issuance succeeds under 20% nonce rejection (retry path, fresh CA)" {
@@ -258,7 +260,9 @@ AdaptiveCard"
   cat >"${CW_STATE}/fixtures/zones.json" <<'JSON'
 [ {"name": "cw-test.internal", "nameServers": ["ns1.cw-test.internal."]} ]
 JSON
-  rm -f "${CW_STATE}"/secrets/* "${CW_STATE}"/certs/* 2>/dev/null || true
+  # A fresh vault holds no soft-deleted names either: e2e-6 left the account secrets soft-deleted,
+  # and the new account registered below could not be stored over them.
+  rm -f "${CW_STATE}"/secrets/* "${CW_STATE}"/deleted-secrets/* "${CW_STATE}"/certs/* 2>/dev/null || true
 
   docker compose -f "${HARNESS}/docker-compose.pebble.yml" \
     -f "${HARNESS}/docker-compose.chaos.override.yml" up -d --wait pebble

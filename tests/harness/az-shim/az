@@ -6,6 +6,9 @@
 #
 # State (CW_AZ_STATE_DIR, required):
 #   secrets/<name>            raw secret values
+#   deleted-secrets/<name>    soft-deleted secrets. Like real Key Vault, a soft-deleted secret keeps
+#                             its name: `secret set` refuses it until it is recovered (or purged,
+#                             which a scenario does by removing the file).
 #   certs/<name>.json         {"name","sans":[...],"notBefore","expires","cn","tags":{...}} — written by
 #                             `certificate import`, which (like real Key Vault) REPLACES the tags with
 #                             its --tags. A scenario seeding a placeholder writes one without them.
@@ -24,7 +27,7 @@ set -euo pipefail
 shopt -s inherit_errexit
 
 state="${CW_AZ_STATE_DIR:?CW_AZ_STATE_DIR is required by the az shim}"
-mkdir -p "${state}/secrets" "${state}/certs" "${state}/fixtures"
+mkdir -p "${state}/secrets" "${state}/deleted-secrets" "${state}/certs" "${state}/fixtures"
 echo "az $*" >>"${state}/calls.log"
 
 # --- generic arg parse ------------------------------------------------------------------------
@@ -106,18 +109,46 @@ case "${cmd[*]}" in
     ;;
 
   "keyvault secret set")
-    printf '%s' "${opt[value]:?}" >"${state}/secrets/${name:?}"
+    # The message is real Key Vault's, which az prints after `ERROR: `.
+    [[ ! -f "${state}/deleted-secrets/${name:?}" ]] ||
+      fail "(Conflict) Secret ${name} is currently in a deleted but recoverable state, and its name cannot be reused; in this state, the secret can only be recovered or purged."
+    printf '%s' "${opt[value]:?}" >"${state}/secrets/${name}"
     id="https://${vault}.vault.azure.test/secrets/${name}/0000000000000000000000000000cafe"
     if [[ "${query}" == "id" ]]; then echo "${id}"; else jq -n --arg id "${id}" '{id: $id}'; fi
     ;;
 
   "keyvault secret list")
     # --query "[].name" -o tsv
-    ls -1 "${state}/secrets" 2>/dev/null || true
+    # Without --include-managed, az filters out managed secrets: the ones backing a certificate.
+    # The sweeper never passes it, so a certificate's secret is never in its listing.
+    for f in "${state}"/secrets/*; do
+      [[ -f "${f}" ]] || continue
+      [[ -f "${state}/certs/$(basename "${f}").json" ]] || basename "${f}"
+    done
     ;;
 
   "keyvault secret delete")
-    rm -f "${state}/secrets/${name:?}"
+    # Soft delete: the secret leaves the listing but keeps its name (see `secret set`).
+    [[ -f "${state}/secrets/${name:?}" ]] || fail "(SecretNotFound) A secret with (name/id) ${name} was not found in this key vault."
+    mv "${state}/secrets/${name}" "${state}/deleted-secrets/${name}"
+    ;;
+
+  "keyvault secret show-deleted")
+    [[ -f "${state}/deleted-secrets/${name:?}" ]] || fail "(SecretNotFound) Deleted Secret not found: ${name}"
+    recoveryId="https://${vault}.vault.azure.test/deletedsecrets/${name}"
+    if [[ "${query}" == "recoveryId" ]]; then
+      echo "${recoveryId}"
+    else
+      jq -n --arg n "${name}" --arg rid "${recoveryId}" '{name: $n, recoveryId: $rid}'
+    fi
+    ;;
+
+  "keyvault secret recover")
+    # Real az waits for the recovery to finish before returning, so the name is usable at once.
+    [[ -f "${state}/deleted-secrets/${name:?}" ]] || fail "(SecretNotFound) Deleted Secret not found: ${name}"
+    mv "${state}/deleted-secrets/${name}" "${state}/secrets/${name}"
+    jq -n --arg n "${name}" --arg vault "${vault}" \
+      '{id: ("https://\($vault).vault.azure.test/secrets/\($n)/0000000000000000000000000000cafe"), name: $n}'
     ;;
 
   "keyvault certificate show")
@@ -146,6 +177,8 @@ case "${cmd[*]}" in
 
   "keyvault certificate delete")
     # Key Vault semantics: deleting a certificate also deletes its backing secret.
+    # Soft delete is modelled for plain secrets only: a certificate is removed outright here,
+    # where real Key Vault would keep its name reserved, too, until it is purged.
     rm -f "${state}/certs/${name:?}.json" "${state}/secrets/${name}"
     ;;
 

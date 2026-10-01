@@ -125,7 +125,10 @@ gh api /repos/<your-org>/<your-repo> --jq .id   # <repo-id>
   reading via trusted-services (e.g. Application Gateway), set
   `network_acls { bypass = "AzureServices" }`.
 - Soft delete stays on (the sweeper relies on it: everything it deletes is recoverable for
-  the retention window).
+  the retention window). A soft-deleted secret keeps its name for that window, so when the
+  warden has to write a `-meta` secret the sweeper deleted, it recovers the old one and writes
+  over it. That needs the secrets `recover` permission, which Key Vault Secrets Officer
+  includes; a custom role in its place must grant it too.
 - Seed a **placeholder** certificate at the production slot name
   (`le-cert-production-<zone-dashed>-pfx`, see [contracts.md](contracts.md) §3) if a consumer
   like Application Gateway must reference the secret id before the warden's first run. The

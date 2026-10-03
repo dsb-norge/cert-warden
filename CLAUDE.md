@@ -71,3 +71,9 @@ Copilot's PR review is supposed to catch what the scanners catch, and it often d
   rejects 20% of nonces, and lego gives up after two attempts. So a failure reading
   `badNonce ... giving up after 2 attempt(s)` can be that alone. Rerun the failed job once
   before debugging; if it fails the same way again, treat it as real.
+- **Don't filter a workflow-run listing when you need the newest run.** `gh run list --status …`
+  and the other filters turn the listing into a search capped at 1,000 results, which then
+  serves stale pages. That made the monitor evaluate a weeks-old warden run. Pitfall P-27 in
+  [testing.md](docs/testing.md#5-the-pitfalls-catalogue) has the details and the safe pattern
+  (`latestRun` in `reusable-monitor.yml`). A `head_sha` filter on one commit matches only a few
+  runs, so it stays well under the cap.

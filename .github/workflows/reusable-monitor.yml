@@ -174,6 +174,42 @@ jobs:
             return 1
           }
 
+          # The newest completed run of workflow id $1, as "id conclusion updated_at url",
+          # preferring one that ACTUALLY ran (success or failure) over a skipped one.
+          #
+          # Deliberately NOT `gh run list --status completed`. A status filter turns the listing
+          # into a search, which GitHub caps at 1,000 results, and once a workflow has more runs
+          # than that it intermittently serves stale, mis-ordered pages. One caller with 1,037
+          # runs had its scheduled monitor resolve a 26-day-old run with no metrics artifact and
+          # send a false "no metrics / 626h old" WARNING. The unfiltered listing is not
+          # search-backed, and it serves runs newest-first across pages. GitHub doesn't document
+          # that order, but the paging below relies on it, as `gh run list` and any bounded
+          # read of a long history must. The sort only orders what was fetched. It doesn't
+          # replace that order.
+          #
+          # Unfiltered, queued and in-progress runs take slots too, and no fixed page size clears
+          # them: the vault lock's `queue: max` lets ~100 runs wait PER VAULT (docs/contracts.md
+          # §5), and a matrix with max-parallel: 1 stacks those queues. So page until a page holds
+          # a run that ran, which is page 1 in practice. The 10-page bound is a backstop: 1,000
+          # newer runs with none of them done is a stuck warden, and "no completed runs" (WARNING)
+          # is then the truth, not a blip.
+          latestRun() {
+            local page pageRuns runs="[]"
+            for page in {1..10}; do
+              pageRuns=$(ghRetry api \
+                "repos/${REPO}/actions/workflows/${1}/runs?per_page=100&page=${page}&exclude_pull_requests=true" \
+                --jq '[.workflow_runs[] | {id, status, conclusion, created_at, updated_at, html_url}]') ||
+                return 1
+              runs=$(printf '%s\n%s\n' "${runs}" "${pageRuns}" | jq -c -s 'add')
+              jq -e 'length < 100 or any(.[]; .status == "completed"
+                       and (.conclusion == "success" or .conclusion == "failure"))' \
+                <<<"${pageRuns}" >/dev/null && break
+            done
+            jq -r '[.[] | select(.status == "completed")] | sort_by(.created_at) | reverse
+                   | ([.[] | select(.conclusion == "success" or .conclusion == "failure")] + .)[0]
+                   | "\(.id) \(.conclusion) \(.updated_at) \(.html_url)"' <<<"${runs}"
+          }
+
           resolveFailed="false"
           runId=""
           conclusion=""
@@ -190,12 +226,7 @@ jobs:
             if [[ -z "${workflowId}" ]]; then
               # The API answered and there is no such workflow: a finding, not a blip.
               echo "::warning::no workflow named '${WORKFLOW_NAME}' in ${REPO} — check the warden-workflow-name input."
-            elif ! runLine=$(ghRetry run list \
-              --repo "${REPO}" \
-              --workflow "${workflowId}" --status completed --limit 20 \
-              --json databaseId,conclusion,updatedAt,url \
-              --jq '([.[] | select(.conclusion == "success" or .conclusion == "failure")] + .)[0]
-                    | "\(.databaseId) \(.conclusion) \(.updatedAt) \(.url)"'); then
+            elif ! runLine=$(latestRun "${workflowId}"); then
               resolveFailed="true"
             else
               # Most recent run that ACTUALLY ran (success or failure) — skipped runs (deploy

@@ -137,7 +137,10 @@ gh api /repos/<your-org>/<your-repo> --jq .id   # <repo-id>
   it recognises its own by the `IssuedBy` tag — so a placeholder draws on
   `max-new-issuance-per-run`, not the renewal budget, and replacing it is recorded `issued`. Don't copy the warden's tags onto the
   placeholder, and have your IaC ignore changes to the object's certificate, policy and tags
-  once it exists (the first import rewrites all three).
+  once it exists (the first import rewrites all three). The sweeper keys on the same tag: it
+  deletes an expired certificate only if the warden issued it. So a placeholder that expires
+  while its zone waits for public delegation stays in place, and removing a placeholder you no
+  longer need is your IaC's job.
 
 ## Runner and network
 

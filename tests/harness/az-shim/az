@@ -165,7 +165,7 @@ case "${cmd[*]}" in
 
   "keyvault certificate list")
     # Two callers, two --query projections:
-    #   sweeper: [].{name:name, exp:attributes.expires}
+    #   sweeper: [].{name:name, exp:attributes.expires, issuedBy:tags.IssuedBy}
     #   warden:  [].{name:name, nbf:attributes.notBefore, exp:attributes.expires, issuedBy:tags.IssuedBy}
     # The shim answers the union — extra keys are ignored by the sweeper's jq, and real az would
     # simply not emit them. Real Key Vault renders both as UTC ISO-8601 with a +00:00 offset,

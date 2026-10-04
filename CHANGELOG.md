@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1](https://github.com/dsb-norge/cert-warden/compare/v1.6.0...v1.6.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **monitor:** resolve the newest warden run without a status filter ([01caaaa](https://github.com/dsb-norge/cert-warden/commit/01caaaaf18690c8ca4f384636eab6314315e9c9f))
+
 ## [1.6.0](https://github.com/dsb-norge/cert-warden/compare/v1.5.0...v1.6.0) (2026-10-01)
 
 

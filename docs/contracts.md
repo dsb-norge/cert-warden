@@ -180,9 +180,11 @@ its to delete (§2). The value is informational.
 
 That distinction exists for **placeholders**. A consumer may seed a self-signed certificate at a
 zone's slot name so that, for example, Application Gateway can reference the secret before the
-first run ([consumer-prerequisites.md](consumer-prerequisites.md#key-vault-expectations)). Without
-the tag, that object reads as a certificate in service, and the zone as renewal work: a run with
-`max-renewals-per-run: none` defers it, and a capped run makes it wait behind every due renewal.
+first run ([consumer-prerequisites.md](consumer-prerequisites.md#key-vault-expectations)). If the
+warden could not tell the two apart, that object would read as a certificate in service, and the
+zone as renewal work: a run with `max-renewals-per-run: none` would defer it, and a capped run
+would make it wait behind every due renewal. Because a placeholder lacks the tag, the zone is
+onboarding instead.
 
 A placeholder can also outlive its validity in service: the warden skips a zone that is not
 publicly delegated, so while delegation is pending nothing replaces it. The sweeper therefore

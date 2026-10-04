@@ -12,12 +12,19 @@
 #     - secrets matching ${TARGET_SECRET_PREFIXES}  (default: le-cert-staging- , letsencrypt-staging-account-)
 #       (the le-cert-staging-*-meta ARI secrets are caught by the le-cert-staging- prefix)
 #   DELETE — expiry (the deterministic catch-all):
-#     - any cert whose attributes.expires is in the past, UNLESS its name matches a protected
-#       prefix. This INCLUDES le-cert-production-* certs: a *live* Cert Warden production cert is
-#       never expired (it is renewed well ahead of expiry via ARI), so the only le-cert-production-*
-#       certs that ever reach expiry are ORPHANS — e.g. a zone removed from dns_zones whose listener
-#       + placeholder TF dropped, leaving its cert to lapse (§3.1). Those SHOULD be reaped, which is
-#       why le-cert-production- is deliberately NOT protected (sweeping by expiry, not by name).
+#     - any cert the warden issued (it carries the IssuedBy tag, docs/contracts.md §3) whose
+#       attributes.expires is in the past, UNLESS its name matches a protected prefix. This
+#       INCLUDES le-cert-production-* certs: a *live* Cert Warden production cert is never expired
+#       (it is renewed well ahead of expiry via ARI), so the only warden certs that ever reach
+#       expiry are ORPHANS — e.g. a zone removed from dns_zones whose listener + placeholder TF
+#       dropped, leaving its cert to lapse (§3.1). Those SHOULD be reaped, which is why
+#       le-cert-production- is deliberately NOT protected (sweeping by expiry, not by name).
+#   KEEP — an expired cert WITHOUT the IssuedBy tag. In practice that is a consumer-seeded
+#     placeholder (docs/consumer-prerequisites.md), and a placeholder can expire while it is still
+#     in service: the warden skips a zone that is not publicly delegated, so it never replaces the
+#     placeholder, and a listener keeps referencing it. Deleting it would break that reference,
+#     and the consumer's IaC, which manages the object, would recover it on its next apply -- the
+#     sweep and the apply undoing each other every week. Removing a placeholder is the IaC's job.
 #   DELETE — orphaned lego metadata (follows the certificate it belongs to):
 #     - any le-cert-*-pfx-meta secret whose certificate (the same name without -meta) is not in
 #       the vault, or is deleted by this run. The warden writes one beside every certificate it
@@ -33,7 +40,7 @@
 #     - letsencrypt-production-account-   the live LE production account secrets (never expire as
 #                                     certs; protected by name as belt-and-suspenders)
 #   The live le-cert-production-* slot needs NO name protection: it is safe by virtue of never
-#   being expired. (Edge case: a renewal that fails until the live cert actually lapses would be
+#   being expired, or, while it holds a placeholder, of not being the warden's. (Edge case: a renewal that fails until the live cert actually lapses would be
 #   reaped — but Layer A monitoring pages on shrinking lifetime long before that, §3.4.)
 #
 # Safety:
@@ -71,6 +78,11 @@ MAX_DELETIONS="${MAX_DELETIONS:-120}" # ~ (41 staging certs + 41 -meta + a few a
 TARGET_CERT_PREFIXES="${TARGET_CERT_PREFIXES:-le-cert-staging-}"
 TARGET_SECRET_PREFIXES="${TARGET_SECRET_PREFIXES:-le-cert-staging- letsencrypt-staging-account-}"
 PROTECTED_PREFIXES="${PROTECTED_PREFIXES:-letsencrypt-production-account- cert-}"
+
+# The tag the warden stamps on every certificate it imports, and so what tells a certificate it
+# issued from a placeholder at the same name (docs/contracts.md §3). The expiry rule reaps only
+# certificates that carry it. Must match wardenIssuedTagName in actions/warden/cert-warden.sh.
+wardenIssuedTagName="IssuedBy"
 
 # --- helpers --------------------------------------------------------------------------------
 
@@ -117,12 +129,13 @@ log-info "Protected prefixes (never deleted): ${PROTECTED_PREFIXES}"
 
 now_epoch="$(date -u +%s)"
 
-# Certs: name + expiry (epoch, or empty when the cert has no expiry set). The az calls are
+# Certs: name + expiry (empty when the cert has no expiry set) + the warden's tag (empty when
+# absent: a JMESPath projection of a missing tag is null). The az calls are
 # captured and failure-checked explicitly: `mapfile < <(az ...)` swallows the exit status
 # (pitfall P-7 class), and a silently-empty listing would turn a scheduled destructive sweep
 # into a green no-op — or worse, desynchronize the cert/secret views.
 certListJson="$(az keyvault certificate list --vault-name "${KV_NAME}" \
-  --query "[].{name:name, exp:attributes.expires}" -o json)" || {
+  --query "[].{name:name, exp:attributes.expires, issuedBy:tags.${wardenIssuedTagName}}" -o json)" || {
   log-error "Failed to list certificates in '${KV_NAME}' — aborting sweep."
   exit 1
 }
@@ -130,7 +143,7 @@ jq -e 'type == "array"' <<<"${certListJson}" >/dev/null 2>&1 || {
   log-error "Certificate listing from az is not a JSON array — aborting sweep."
   exit 1
 }
-mapfile -t cert_rows < <(jq -r '.[] | "\(.name)\t\(.exp // "")"' <<<"${certListJson}")
+mapfile -t cert_rows < <(jq -r '.[] | "\(.name)\t\(.exp // "")\t\(.issuedBy // "")"' <<<"${certListJson}")
 
 # Secrets: name only.
 secretListTsv="$(az keyvault secret list --vault-name "${KV_NAME}" --query "[].name" -o tsv)" || {
@@ -144,8 +157,11 @@ declare -a del_certs=() del_secrets=() staying_certs=()
 
 start-group "Evaluating ${#cert_rows[@]} certificate(s)"
 for row in "${cert_rows[@]}"; do
+  # Split by hand, not with `read`: tab is IFS whitespace, so an empty field would collapse.
   name="${row%%$'\t'*}"
-  exp="${row#*$'\t'}"
+  rest="${row#*$'\t'}"
+  exp="${rest%%$'\t'*}"
+  issued_by="${rest#*$'\t'}"
 
   if is_protected "${name}"; then
     log-info "  protect : ${name} (protected prefix)"
@@ -154,13 +170,18 @@ for row in "${cert_rows[@]}"; do
   fi
 
   reason=""
+  note=""
   if matches_any_prefix "${name}" "${TARGET_CERT_PREFIXES}"; then
     reason="orphan-name"
   elif [[ "${SWEEP_EXPIRED}" == "true" && -n "${exp}" ]]; then
     # az returns ISO-8601; convert to epoch and compare.
     exp_epoch="$(date -u -d "${exp}" +%s 2>/dev/null || echo 0)"
     if [[ "${exp_epoch}" -gt 0 && "${exp_epoch}" -lt "${now_epoch}" ]]; then
-      reason="expired(${exp})"
+      if [[ -n "${issued_by}" ]]; then
+        reason="expired(${exp})"
+      else
+        note=" (expired ${exp}, but no '${wardenIssuedTagName}' tag: not the warden's, e.g. a seeded placeholder)"
+      fi
     fi
   fi
 
@@ -168,7 +189,7 @@ for row in "${cert_rows[@]}"; do
     log-info "  DELETE  : ${name} [${reason}]"
     del_certs+=("${name}")
   else
-    log-info "  keep    : ${name}"
+    log-info "  keep    : ${name}${note}"
     staying_certs+=("${name}")
   fi
 done

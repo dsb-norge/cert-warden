@@ -82,7 +82,10 @@ output. Consumers that branch on `severity` must treat an unrecognised value as 
 It deletes:
 
 - certificates and secrets matching the target prefixes;
-- certificates that have expired (unless `SWEEP_EXPIRED=false`);
+- certificates the warden issued (the `IssuedBy` tag,
+  [§3](#the-issuedby-tag-which-certificates-are-the-wardens)) that have expired (unless
+  `SWEEP_EXPIRED=false`). An expired certificate without the tag — in practice a seeded
+  placeholder — is kept: it may still be in service, and removing it is the consumer's IaC's job;
 - lego metadata secrets (`le-cert-*-pfx-meta`, [§3](#3-the-key-vault-naming-scheme)) whose
   certificate is not in the vault or is deleted in the same run. This rule has no input: the
   `-meta` secret exists only for its certificate.
@@ -172,7 +175,8 @@ Every certificate the warden imports is tagged `IssuedBy=<ACME directory URL>`, 
 caller-supplied `ApplicationName`, `CreatedBy` and `Description` (an import **replaces** an
 object's tags, so these are the only ones it keeps). The tag *name* is contract: it is how the
 warden tells a certificate it issued from anything else at the same object name, and so which
-budget a zone draws on (§1). The value is informational.
+budget a zone draws on (§1). The sweeper reads it too, to decide which expired certificates are
+its to delete (§2). The value is informational.
 
 That distinction exists for **placeholders**. A consumer may seed a self-signed certificate at a
 zone's slot name so that, for example, Application Gateway can reference the secret before the
@@ -180,16 +184,22 @@ first run ([consumer-prerequisites.md](consumer-prerequisites.md#key-vault-expec
 the tag, that object reads as a certificate in service, and the zone as renewal work: a run with
 `max-renewals-per-run: none` defers it, and a capped run makes it wait behind every due renewal.
 
+A placeholder can also outlive its validity in service: the warden skips a zone that is not
+publicly delegated, so while delegation is pending nothing replaces it. The sweeper therefore
+deletes an expired certificate only if it carries the tag; an expired placeholder stays.
+
 So, for anyone creating objects at a slot name:
 
 - **Never put `IssuedBy` on a placeholder.** It would be classed as a renewal until the warden
-  replaces it — the behaviour this tag exists to prevent.
+  replaces it — the behaviour this tag exists to prevent — and the sweeper would delete it once
+  it expired.
 - **Nothing else is needed.** The warden's first import replaces the placeholder's tags with its
   own, so the zone becomes a renewal exactly when it gets its first real certificate. If your IaC
   manages the object, ignore changes to its tags (and certificate and policy), or it will try to
   revert the import.
 - Renaming the tag would turn every zone in every consumer's vault into a first issuance at once,
-  so treat it like an object name: a breaking change.
+  and stop the sweeper deleting any expired certificate the warden issued, so treat it like an
+  object name: a breaking change.
 
 ## 4. The bot notification contract (external)
 

@@ -18,7 +18,9 @@ inputs:
     required: false
     default: "120"
   sweep-expired:
-    description: "Also target expired, non-protected certificates."
+    description: >-
+      Also target expired, non-protected certificates the warden issued (its IssuedBy tag). An
+      expired certificate without the tag, e.g. a seeded placeholder, is kept.
     required: false
     default: "true"
   target-cert-prefixes:

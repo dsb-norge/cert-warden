@@ -44,13 +44,15 @@ AZSTUB
 # --- fixtures ---------------------------------------------------------------------------------
 
 seed_typical_vault() {
-  # Shape = output of: az keyvault certificate list --query "[].{name:name, exp:attributes.expires}" -o json
+  # Shape = output of:
+  #   az keyvault certificate list --query "[].{name:name, exp:attributes.expires, issuedBy:tags.IssuedBy}" -o json
+  # A missing tag projects to null, not an absent key.
   cat >"${AZ_STUB_CERTS_JSON}" <<'JSON'
 [
-  {"name": "le-cert-production-live-example-pfx", "exp": "2099-01-01T00:00:00+00:00"},
-  {"name": "le-cert-staging-orphan-example-pfx",  "exp": "2099-01-01T00:00:00+00:00"},
-  {"name": "le-cert-production-lapsed-zone-pfx",  "exp": "2001-01-01T00:00:00+00:00"},
-  {"name": "cert-legacy-acme-import",             "exp": "2001-01-01T00:00:00+00:00"}
+  {"name": "le-cert-production-live-example-pfx", "exp": "2099-01-01T00:00:00+00:00", "issuedBy": "https://acme-v02.api.letsencrypt.org/directory"},
+  {"name": "le-cert-staging-orphan-example-pfx",  "exp": "2099-01-01T00:00:00+00:00", "issuedBy": "https://acme-staging-v02.api.letsencrypt.org/directory"},
+  {"name": "le-cert-production-lapsed-zone-pfx",  "exp": "2001-01-01T00:00:00+00:00", "issuedBy": "https://acme-v02.api.letsencrypt.org/directory"},
+  {"name": "cert-legacy-acme-import",             "exp": "2001-01-01T00:00:00+00:00", "issuedBy": null}
 ]
 JSON
   # Shape = output of: az keyvault secret list --query "[].name" -o tsv
@@ -101,6 +103,36 @@ TSV
   assert_line --partial "keep    : le-cert-production-lapsed-zone-pfx"
   # ... and their -meta with them: it follows the certificate, not the expiry.
   assert_line --partial "keep    : le-cert-production-lapsed-zone-pfx-meta"
+}
+
+@test "expiry: an expired certificate without the IssuedBy tag (a seeded placeholder) is kept" {
+  # A consumer's placeholder at a production slot outlives its validity while the zone waits for
+  # public delegation, and a listener still references it. Only the warden's certificates are the
+  # expiry rule's to reap; the same lapsed zone carrying the tag is still deleted.
+  cat >"${AZ_STUB_CERTS_JSON}" <<'JSON'
+[
+  {"name": "le-cert-production-undelegated-zone-pfx", "exp": "2001-01-01T00:00:00+00:00", "issuedBy": null},
+  {"name": "le-cert-production-lapsed-zone-pfx",      "exp": "2001-01-01T00:00:00+00:00", "issuedBy": "https://acme-v02.api.letsencrypt.org/directory"}
+]
+JSON
+  export LOG_ONLY="false"
+  run bash "${SWEEPER_SH}"
+  assert_success
+  assert_line --partial "keep    : le-cert-production-undelegated-zone-pfx (expired 2001-01-01T00:00:00+00:00, but no 'IssuedBy' tag"
+  assert_line --partial "DELETE  : le-cert-production-lapsed-zone-pfx [expired"
+  run grep -c "certificate delete" "${AZ_STUB_CALLS}"
+  assert_output "1"
+  run grep -c "le-cert-production-undelegated-zone-pfx" "${AZ_STUB_CALLS}"
+  assert_output "0"
+}
+
+@test "expiry: the tag the sweeper reads is the one the warden stamps" {
+  # Renaming one and not the other fails silently in opposite directions: a sweeper reading a tag
+  # nothing carries would never reap an expired warden certificate again.
+  sweeper_tag="$(sed -n 's/^wardenIssuedTagName="\(.*\)"$/\1/p' "${SWEEPER_SH}")"
+  warden_tag="$(sed -n 's/^wardenIssuedTagName="\(.*\)"$/\1/p' "${WARDEN_SH}")"
+  assert [ -n "${sweeper_tag}" ]
+  assert_equal "${sweeper_tag}" "${warden_tag}"
 }
 
 @test "orphaned -meta: deleted once its certificate is gone or deleted, kept while it stays" {

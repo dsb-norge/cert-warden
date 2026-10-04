@@ -731,3 +731,27 @@ JSON
   run find "${CW_STATE}/deleted-certs" "${CW_STATE}/deleted-secrets" -type f
   assert_output ""
 }
+
+@test "e2e-19 expiry: the sweep deletes an expired warden certificate and keeps an expired placeholder" {
+  # The expiry rule tells the two apart by the IssuedBy tag the warden's own import wrote, read
+  # through the same listing in both scripts -- which the sweeper's unit fixtures cannot vouch
+  # for. A consumer's placeholder at the slot of a zone that is not publicly delegated is never
+  # replaced by the warden, so it can expire while a listener still references it. Both objects
+  # are aged past their expiry here; prefixes that match nothing leave the expiry rule alone in play.
+  warden_kv="le-cert-staging-cw-test-internal-pfx"
+  placeholder_kv="le-cert-production-undelegated-cw-test-internal-pfx"
+  seed_placeholder "undelegated.cw-test.internal" "${placeholder_kv}"
+  for kv in "${warden_kv}" "${placeholder_kv}"; do
+    jq '.expires = "2001-01-01T00:00:00+00:00"' "${CW_STATE}/certs/${kv}.json" >"${CW_STATE}/certs/${kv}.json.new"
+    mv "${CW_STATE}/certs/${kv}.json.new" "${CW_STATE}/certs/${kv}.json"
+  done
+
+  KV_NAME="kv-l2" LOG_ONLY="false" TARGET_CERT_PREFIXES="none-" TARGET_SECRET_PREFIXES="none-" \
+    run bash "${SWEEPER_SH}"
+  assert_success
+  assert_line --partial "DELETE  : ${warden_kv} [expired"
+  assert_line --partial "keep    : ${placeholder_kv} (expired 2001-01-01T00:00:00+00:00, but no 'IssuedBy' tag"
+  [ -f "${CW_STATE}/deleted-certs/${warden_kv}.json" ]
+  [ -f "${CW_STATE}/certs/${placeholder_kv}.json" ]
+  [ -f "${CW_STATE}/secrets/${placeholder_kv}" ]
+}

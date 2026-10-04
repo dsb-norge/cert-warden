@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.2](https://github.com/dsb-norge/cert-warden/compare/v1.6.1...v1.6.2) (2026-10-04)
+
+
+### Bug Fixes
+
+* **sweeper:** reap only expired certificates the warden issued ([ee9f1e5](https://github.com/dsb-norge/cert-warden/commit/ee9f1e55d99a19fc1983279809856e409b56b6a3))
+
 ## [1.6.1](https://github.com/dsb-norge/cert-warden/compare/v1.6.0...v1.6.1) (2026-10-04)
 
 
